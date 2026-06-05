@@ -9,6 +9,7 @@ import time
 # ================= CONFIG =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GIT_TOKEN = os.environ.get("GIT_TOKEN")         # Token GitHub pour les pushs
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -68,6 +69,7 @@ Exemple : [MEMO:apprentissages] Fidjrossè montre un intérêt pour les visites 
 
 Commandes disponibles pour l'utilisateur :
 /mem - affiche l'état actuel de la mémoire
+/save <fichier> <texte> - sauvegarde manuelle (fiable)
 /pc - liste les commandes PC
 Sois concis, professionnel, adapté au contexte béninois."""
 
@@ -123,7 +125,14 @@ def handle_memo_action(response_text):
 # ================= COMMANDES TELEGRAM =================
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    bot.reply_to(message, "Bonjour, je suis NovaBot Cloud, toujours à votre service.\nCommandes :\n/mem - voir la mémoire\n/pc - commandes PC\nPosez-moi directement une question.")
+    bot.reply_to(message, """Bonjour, je suis NovaBot Cloud, toujours à votre service.
+
+Commandes :
+/mem - voir la mémoire
+/save <fichier> <texte> - sauvegarder une info
+/pc - commandes PC
+
+Posez-moi directement une question.""")
 
 @bot.message_handler(commands=['mem'])
 def show_memory(message):
@@ -137,6 +146,26 @@ def show_memory(message):
 @bot.message_handler(commands=['pc'])
 def pc_commands(message):
     bot.reply_to(message, "Commandes PC (à connecter) : /eteindre, /redemarrer, /ram, /screenshot")
+
+@bot.message_handler(commands=['save'])
+def save_memory_command(message):
+    """Sauvegarde manuelle dans un fichier mémoire.
+    Usage : /save cibles Le texte à ajouter"""
+    try:
+        parts = message.text.split(" ", 2)
+        if len(parts) < 3:
+            bot.reply_to(message, "Usage : /save <fichier> <texte>\nExemple : /save apprentissages Hôtel Le Nid intéressé")
+            return
+        key = parts[1].lower()
+        text = parts[2]
+        if key not in FILES:
+            bot.reply_to(message, f"Fichier inconnu. Choisis parmi : {', '.join(FILES.keys())}")
+            return
+        MEMORY[key] += text.strip() + "\n"
+        save_memory(key)
+        bot.reply_to(message, f"✅ Ajouté à {key}.md")
+    except Exception as e:
+        bot.reply_to(message, f"Erreur : {str(e)}")
 
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
@@ -155,8 +184,6 @@ def run_flask():
 
 # ================= LANCEMENT =================
 if __name__ == '__main__':
-    # Token GitHub toujours nécessaire pour la persistance mémoire
-    GIT_TOKEN = os.environ.get("GIT_TOKEN")
     git_setup()
     git_pull()
     load_memory()
