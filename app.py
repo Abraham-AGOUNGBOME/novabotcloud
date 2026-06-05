@@ -8,6 +8,9 @@ import time
 from bs4 import BeautifulSoup
 from apscheduler.schedulers.background import BackgroundScheduler
 import logging
+from collections import defaultdict
+from datetime import datetime, timedelta
+import re
 
 # ================= CONFIG =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -21,6 +24,21 @@ scheduler = BackgroundScheduler()
 scheduler.start()
 
 logging.basicConfig(level=logging.INFO)
+
+# ================= AUTORISATION =================
+AUTHORIZED_IDS = os.environ.get("AUTHORIZED_USERS", "").split(",")
+AUTHORIZED_IDS = [uid.strip() for uid in AUTHORIZED_IDS if uid.strip()]
+
+def is_authorized(message):
+    return str(message.chat.id) in AUTHORIZED_IDS
+
+def authorized_only(func):
+    def wrapper(message, *args, **kwargs):
+        if not is_authorized(message):
+            bot.reply_to(message, "⛔ Commande réservée à l'administrateur.")
+            return
+        return func(message, *args, **kwargs)
+    return wrapper
 
 # ================= MÉMOIRE PERSISTANTE =================
 MEMORY_DIR = "memory"
@@ -62,29 +80,58 @@ def save_memory(key):
         f.write(MEMORY[key])
     git_push()
 
-# ================= PROMPT AMÉLIORÉ =================
-SYSTEM_PROMPT = """Tu es NovaBot, l'agent commercial IA de NovaTech-IA, basé à Cotonou (Bénin).
-Ton rôle : aider à vendre des visites virtuelles 3D, des bots Telegram et de l'automatisation IA aux PME béninoises.
-Tu es proactif, concis et toujours orienté vers l'action commerciale.
-
-**Règles de comportement :**
-1. Quand l'utilisateur demande un message de prospection, tu génères un message prêt à envoyer, adapté au contexte local (français du Bénin, formules de politesse, référence aux quartiers).
-2. Tu t'appuies systématiquement sur les fichiers mémoire : cibles.md, tarifs.md, apprentissages.md.
-3. Si une information clé n'est pas dans la mémoire, tu le signales et proposes de l'ajouter via /save.
-4. Après chaque échange, tu proposes une action concrète : envoi d'un message, ajout d'une cible, relance d'un prospect.
-5. Tu analyses les opportunités : si un nouveau quartier ou type d'établissement est mentionné, tu suggères de l'ajouter aux cibles.
-
-**Format de réponse :**
-- Toujours signer par "— NovaBot"
-- Si tu sauvegardes automatiquement une info, utilise la ligne [MEMO:fichier] contenu.
-- Sinon, termine par une question ouverte pour engager la suite.
-
-**Connaissance du marché béninois :**
-- Quartiers porteurs : Fidjrossè, Cadjehoun, Haie Vive, Ganhi, Zongo.
-- Budgets typiques : 75 000 - 120 000 FCFA pour un scan 3D.
-- Clients types : résidences meublées, hôtels boutique, agences immobilières.
-- Concurrence faible, argument principal : innovation et modernité.
+# ================= PROMPTS SYSTÈME =================
+ADMIN_PROMPT = """Tu es NovaBot, l'assistant administratif de Larry (l'agent commercial de NovaTech-IA, Cotonou, Bénin).
+Tu aides l'administrateur à gérer le business : analyse de marché, rédaction de messages de prospection, suivi des cibles.
+Tu as accès à la mémoire (cibles, tarifs, apprentissages) et tu peux suggérer des actions.
+Quand c'est pertinent, termine par [MEMO:fichier] contenu pour sauvegarder automatiquement.
+Sois concis et orienté action.
 """
+
+CLIENT_PROMPT = """Tu es Larry, un assistant commercial amical et professionnel représentant NovaTech-IA, une entreprise innovante de visites virtuelles 3D et d'automatisation basée à Cotonou, Bénin.
+Ton rôle est d'écouter le client, de comprendre ses besoins et de le convaincre en douceur, sans jamais être insistant.
+
+Règles strictes :
+- Ne demande jamais explicitement le nom, le téléphone ou d'autres informations personnelles. Si le client les donne spontanément, tu peux les utiliser.
+- Ne mentionne pas de prix sauf si le client le demande. Si on te demande un prix, tu donnes les tarifs standards (scan 3D standard 75 000 FCFA, premium 120 000 FCFA, hébergement 5 000 FCFA/mois).
+- Ne propose jamais de devis ni de rendez-vous. Si le client en veut un, réponds poliment que tu vas vérifier la disponibilité et que tu reviens vers lui.
+- Reste toujours dans le contexte de la conversation. Utilise l'historique fourni pour ne pas te répéter.
+- Si le client semble prêt à acheter ou donne des informations claires sur son projet, tu prépares un résumé pour l'administrateur (que tu ne vois pas) en utilisant la balise spéciale [RESUME] (voir format plus bas).
+- Ne mentionne jamais les commandes admin, la mémoire, ou les coulisses techniques.
+
+Format du résumé (à n'utiliser que lorsque tu as suffisamment d'éléments) :
+[RESUME]
+Prospect : (prénom/nom si donné, sinon "inconnu")
+Contact : (username Telegram si visible, sinon ID)
+Besoin exprimé : ...
+Budget évoqué ou réaction au prix : ...
+Intérêt : (chaud/tiède/froid)
+Nouveauté détectée : (décrire tout élément qui semble ne pas être dans la liste habituelle des cibles ou apprentissages – si tu n'as pas la mémoire, mets "inconnu")
+[FIN RESUME]
+
+Tu ne dois envoyer ce résumé qu'une seule fois, quand tu estimes avoir assez d'informations. Ensuite, tu attends les instructions (tu ne sais pas comment, c'est géré en coulisses).
+"""
+
+# ================= GESTION DES CONVERSATIONS =================
+conversations = defaultdict(list)  # par chat_id, liste de (role, texte)
+last_activity = {}                 # chat_id -> datetime du dernier message
+
+def get_conversation_context(chat_id):
+    """Retourne l'historique formaté pour le prompt."""
+    msgs = conversations[chat_id]
+    if not msgs:
+        return ""
+    lines = []
+    for role, text in msgs:
+        if role == "user":
+            lines.append(f"Client : {text}")
+        else:
+            lines.append(f"Larry : {text}")
+    return "\n".join(lines)
+
+def reset_conversation(chat_id):
+    conversations.pop(chat_id, None)
+    last_activity.pop(chat_id, None)
 
 # ================= GROQ =================
 def call_groq(messages):
@@ -105,16 +152,27 @@ def call_groq(messages):
     except Exception as e:
         return f"Erreur API Groq : {str(e)}"
 
-def process_message(user_text):
-    mem_context = ""
-    for key, content in MEMORY.items():
-        if content.strip():
-            mem_context += f"=== {key}.md ===\n{content}\n\n"
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": f"Mémoire actuelle :\n{mem_context}" if mem_context else "Aucune mémoire."},
-        {"role": "user", "content": user_text}
-    ]
+def process_message(user_text, chat_id, is_admin=False):
+    if is_admin:
+        mem_context = ""
+        for key, content in MEMORY.items():
+            if content.strip():
+                mem_context += f"=== {key}.md ===\n{content}\n\n"
+        messages = [
+            {"role": "system", "content": ADMIN_PROMPT},
+        ]
+        if mem_context:
+            messages.append({"role": "system", "content": f"Mémoire actuelle :\n{mem_context}"})
+        messages.append({"role": "user", "content": user_text})
+    else:
+        history = get_conversation_context(chat_id)
+        system_prompt = CLIENT_PROMPT
+        if history:
+            system_prompt += f"\n\nHistorique de la conversation :\n{history}\n\nRéponds en tenant compte de ce contexte."
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text}
+        ]
     return call_groq(messages)
 
 def handle_memo_action(response_text):
@@ -135,87 +193,98 @@ def handle_memo_action(response_text):
             clean_lines.append(line)
     return "\n".join(clean_lines)
 
+def handle_resume_action(response_text, chat_id):
+    """Cherche un résumé dans la réponse de Larry et le transmet à l'admin."""
+    if "[RESUME]" in response_text:
+        admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
+        if admin_chat_id:
+            match = re.search(r"\[RESUME\](.*?)\[FIN RESUME\]", response_text, re.DOTALL)
+            if match:
+                resume = match.group(1).strip()
+                # Détection nouveauté
+                nouveaute = detecter_nouveaute(resume)
+                msg = f"📩 Résumé prospect :\n{resume}"
+                if nouveaute:
+                    msg += f"\n\n🆕 Nouveauté détectée : {nouveaute}\nSouhaitez-vous l'ajouter ? (/save ...)"
+                bot.send_message(admin_chat_id, msg)
+                # Réinitialiser la conversation après résumé
+                reset_conversation(chat_id)
+    return response_text
+
+def detecter_nouveaute(resume_text):
+    """Compare le résumé avec cibles.md et apprentissages.md pour trouver des éléments nouveaux."""
+    cibles = MEMORY.get("cibles", "").lower()
+    apprentissages = MEMORY.get("apprentissages", "").lower()
+    resume_lower = resume_text.lower()
+    nouveautes = []
+    mots_cles = ["quartier", "zone", "type de bien", "budget", "concurrent", "nouveau"]
+    for mot in mots_cles:
+        if mot in resume_lower:
+            phrases = resume_lower.split(".")
+            for phrase in phrases:
+                if mot in phrase and phrase.strip() not in cibles and phrase.strip() not in apprentissages:
+                    nouveautes.append(phrase.strip().capitalize())
+    if nouveautes:
+        return " ; ".join(nouveautes[:2])
+    return None
+
 # ================= SCRAPING =================
 def scrape_annonces():
-    """Scrape Keur-immo Bénin et retourne les annonces filtrées par quartier."""
-    try:
-        url = "https://keur-immo.com/benin"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        resp = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        
-        # Sélecteurs à adapter si le site change (à vérifier une fois)
-        annonces = soup.select(".item-listing")  # ou ".listing-item"
-        nouvelles = []
-        quartiers_cibles = ["fidjrossè", "haie vive", "cadjèhoun", "akpakpa", "ganhi", "zongo", "calavi"]
-        
-        for annonce in annonces[:10]:  # Limiter à 10 annonces pour la performance
-            titre_elem = annonce.select_one("h2") or annonce.select_one(".titre")
-            prix_elem = annonce.select_one(".price") or annonce.select_one(".prix")
-            lien_elem = annonce.select_one("a")
-            localisation_elem = annonce.select_one(".location") or annonce.select_one(".ville")
-            
-            titre = titre_elem.text.strip() if titre_elem else "Sans titre"
-            prix = prix_elem.text.strip() if prix_elem else "N/C"
-            lien = lien_elem["href"] if lien_elem and lien_elem.get("href") else ""
-            localisation = localisation_elem.text.strip().lower() if localisation_elem else ""
-            
-            # Filtre par quartier
-            if any(q in localisation for q in quartiers_cibles):
-                nouvelles.append(f"🏠 {titre}\n💰 {prix}\n📍 {localisation.title()}\n🔗 {lien}\n")
-        
-        return "\n".join(nouvelles) if nouvelles else "Aucune annonce pertinente trouvée aujourd'hui."
-    except Exception as e:
-        return f"Erreur de scraping : {str(e)}"
+    # Placeholder – à adapter avec les vrais sélecteurs
+    return "Scraping non configuré (sélecteurs à adapter)."
 
 def job_quotidien():
     chat_id = os.environ.get("ADMIN_CHAT_ID")
     if not chat_id:
-        logging.warning("ADMIN_CHAT_ID non défini, impossible d'envoyer le rapport.")
         return
     rapport = scrape_annonces()
-    bot.send_message(chat_id, f"📊 Rapport quotidien des annonces :\n\n{rapport}")
+    bot.send_message(chat_id, f"📊 Rapport quotidien :\n{rapport}")
 
-# Planification : tous les jours à 7h00 UTC+1 (heure de Cotonou)
 scheduler.add_job(job_quotidien, 'cron', hour=7, minute=0, timezone='Africa/Porto-Novo')
+
+# ================= RECHERCHE =================
+def duckduckgo_search(query):
+    try:
+        url = "https://api.duckduckgo.com/"
+        params = {"q": query, "format": "json", "no_html": 1, "skip_disambig": 1}
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        abstract = data.get("AbstractText") or data.get("RelatedTopics", [{}])[0].get("Text", "")
+        return abstract or "Aucune information trouvée."
+    except Exception as e:
+        return f"Erreur recherche : {e}"
 
 # ================= COMMANDES TELEGRAM =================
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    bot.reply_to(message, """Bonjour, je suis NovaBot Cloud, toujours à votre service.
-
-Commandes :
-/mem - voir la mémoire
-/save <fichier> <texte> - sauvegarder une info
-/pc - commandes PC
-/scrape - lancer un scraping manuel (test)
-
-Posez-moi directement une question.""")
+    if is_authorized(message):
+        bot.reply_to(message, """👑 Mode Administrateur Larry
+Commandes : /mem, /save, /scrape, /search, /pc
+Larry est en ligne pour les clients.""")
+    else:
+        username = message.chat.username or message.chat.first_name or "vous"
+        bot.reply_to(message, f"Bonjour {username}, je suis Larry, conseiller chez NovaTech-IA. Comment puis-je vous aider aujourd'hui ?")
 
 @bot.message_handler(commands=['mem'])
+@authorized_only
 def show_memory(message):
-    text = "=== MÉMOIRE ACTUELLE ===\n"
+    text = "=== MÉMOIRE ===\n"
     for key, content in MEMORY.items():
-        text += f"\n--- {key}.md ---\n{content if content else '(vide)'}"
-    if len(text) > 4000:
-        text = text[:4000] + "\n... (tronqué)"
-    bot.reply_to(message, text)
-
-@bot.message_handler(commands=['pc'])
-def pc_commands(message):
-    bot.reply_to(message, "Commandes PC (à connecter) : /eteindre, /redemarrer, /ram, /screenshot")
+        text += f"\n--- {key}.md ---\n{content or '(vide)'}"
+    bot.reply_to(message, text[:4000])
 
 @bot.message_handler(commands=['save'])
+@authorized_only
 def save_memory_command(message):
     try:
         parts = message.text.split(" ", 2)
         if len(parts) < 3:
-            bot.reply_to(message, "Usage : /save <fichier> <texte>\nExemple : /save apprentissages Hôtel Le Nid intéressé")
+            bot.reply_to(message, "Usage : /save <fichier> <texte>")
             return
         key = parts[1].lower()
         text = parts[2]
         if key not in FILES:
-            bot.reply_to(message, f"Fichier inconnu. Choisis parmi : {', '.join(FILES.keys())}")
+            bot.reply_to(message, f"Fichiers : {', '.join(FILES.keys())}")
             return
         MEMORY[key] += text.strip() + "\n"
         save_memory(key)
@@ -224,19 +293,58 @@ def save_memory_command(message):
         bot.reply_to(message, f"Erreur : {str(e)}")
 
 @bot.message_handler(commands=['scrape'])
+@authorized_only
 def scrape_manuel(message):
     bot.send_chat_action(message.chat.id, 'typing')
     rapport = scrape_annonces()
     bot.reply_to(message, rapport)
 
+@bot.message_handler(commands=['search'])
+@authorized_only
+def search_command(message):
+    try:
+        query = message.text.split(" ", 1)[1]
+    except IndexError:
+        bot.reply_to(message, "Usage : /search <mots-clés>")
+        return
+    bot.send_chat_action(message.chat.id, 'typing')
+    result = duckduckgo_search(query)
+    bot.reply_to(message, f"🔍 Résultat : {result}")
+
+@bot.message_handler(commands=['pc'])
+@authorized_only
+def pc_commands(message):
+    bot.reply_to(message, "Commandes PC (à connecter) : /eteindre, /redemarrer, /ram, /screenshot")
+
+# ================= HANDLER GÉNÉRAL =================
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
+    chat_id = str(message.chat.id)
+    is_admin = is_authorized(message)
+
+    # Mise à jour de l'historique pour les clients
+    if not is_admin:
+        conversations[chat_id].append(("user", message.text))
+        if len(conversations[chat_id]) > 10:
+            conversations[chat_id] = conversations[chat_id][-10:]
+        last_activity[chat_id] = datetime.now()
+
     bot.send_chat_action(message.chat.id, 'typing')
-    response = process_message(message.text)
-    response = handle_memo_action(response)
+    response = process_message(message.text, chat_id, is_admin)
+
+    if is_admin:
+        response = handle_memo_action(response)
+    else:
+        conversations[chat_id].append(("bot", response))
+        # Nettoyer la réponse de tout résumé avant de l'envoyer au client
+        response_clean = re.sub(r"\[RESUME\].*?\[FIN RESUME\]", "", response, flags=re.DOTALL).strip()
+        # Transmettre le résumé à l'admin si présent
+        handle_resume_action(response, chat_id)
+        response = response_clean
+
     bot.reply_to(message, response)
 
-# ================= SERVEUR FLASK (health check) =================
+# ================= SERVEUR FLASK =================
 @app.route('/')
 def health():
     return 'Bot is running'
@@ -244,14 +352,24 @@ def health():
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
 
+# ================= DÉTECTION INACTIVITÉ =================
+def check_inactive_conversations():
+    now = datetime.now()
+    for chat_id, last_time in list(last_activity.items()):
+        if now - last_time > timedelta(minutes=5):
+            admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
+            if admin_chat_id:
+                bot.send_message(admin_chat_id, f"⏰ Le prospect {chat_id} est inactif depuis 5 minutes. Pensez à vérifier.")
+            reset_conversation(chat_id)
+
+scheduler.add_job(check_inactive_conversations, 'interval', minutes=1)
+
 # ================= LANCEMENT =================
 if __name__ == '__main__':
     git_setup()
     git_pull()
     load_memory()
-
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
-
     bot.infinity_polling()
