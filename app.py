@@ -8,9 +8,8 @@ import time
 
 # ================= CONFIG =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
-GIT_TOKEN = os.environ.get("GIT_TOKEN")
-DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
@@ -25,28 +24,21 @@ FILES = {
 MEMORY = {}
 
 def git_setup():
-    """Configure git avec le token pour les pushs automatiques."""
     repo_url = f"https://{GIT_TOKEN}@github.com/Abraham-AGOUNGBOME/novabotcloud.git"
     subprocess.run(["git", "remote", "set-url", "origin", repo_url], capture_output=True)
     subprocess.run(["git", "config", "user.email", "novabot@novatech.bj"], capture_output=True)
     subprocess.run(["git", "config", "user.name", "NovaBot"], capture_output=True)
 
 def git_pull():
-    """Récupère les derniers changements depuis GitHub."""
     subprocess.run(["git", "pull", "origin", "main"], capture_output=True)
 
 def git_push():
-    """Commit et push les modifications des fichiers mémoire."""
-    # Ajouter seulement les fichiers du dossier memory
     subprocess.run(["git", "add", f"{MEMORY_DIR}/*.md"], capture_output=True)
-    # Commit avec message horodaté
     commit_msg = f"Memory update {time.strftime('%Y-%m-%d %H:%M:%S')}"
     subprocess.run(["git", "commit", "-m", commit_msg], capture_output=True)
-    # Push
     subprocess.run(["git", "push", "origin", "main"], capture_output=True)
 
 def load_memory():
-    """Charge les fichiers .md depuis le dossier memory."""
     os.makedirs(MEMORY_DIR, exist_ok=True)
     for key, filename in FILES.items():
         filepath = os.path.join(MEMORY_DIR, filename)
@@ -57,11 +49,9 @@ def load_memory():
             MEMORY[key] = ""
 
 def save_memory(key):
-    """Sauvegarde un fichier mémoire localement et pousse vers GitHub."""
     filepath = os.path.join(MEMORY_DIR, FILES[key])
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(MEMORY[key])
-    # Pousser sur GitHub
     git_push()
 
 # ================= PROMPT SYSTÈME =================
@@ -81,24 +71,24 @@ Commandes disponibles pour l'utilisateur :
 /pc - liste les commandes PC
 Sois concis, professionnel, adapté au contexte béninois."""
 
-# ================= DEEPSEEK =================
-def call_deepseek(messages):
+# ================= GROQ =================
+def call_groq(messages):
     headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
     data = {
-        "model": "deepseek-chat",
+        "model": "llama-3.1-8b-instant",
         "messages": messages,
         "temperature": 0.7,
         "max_tokens": 1000
     }
     try:
-        resp = requests.post(DEEPSEEK_URL, headers=headers, json=data, timeout=30)
+        resp = requests.post(GROQ_URL, headers=headers, json=data, timeout=30)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception as e:
-        return f"Erreur API : {str(e)}"
+        return f"Erreur API Groq : {str(e)}"
 
 def process_message(user_text):
     mem_context = ""
@@ -110,10 +100,9 @@ def process_message(user_text):
         {"role": "system", "content": f"Mémoire actuelle :\n{mem_context}" if mem_context else "Aucune mémoire."},
         {"role": "user", "content": user_text}
     ]
-    return call_deepseek(messages)
+    return call_groq(messages)
 
 def handle_memo_action(response_text):
-    """Détecte les actions mémoire et les exécute."""
     lines = response_text.split("\n")
     clean_lines = []
     for line in lines:
@@ -166,11 +155,10 @@ def run_flask():
 
 # ================= LANCEMENT =================
 if __name__ == '__main__':
-    # Configuration git
+    # Token GitHub toujours nécessaire pour la persistance mémoire
+    GIT_TOKEN = os.environ.get("GIT_TOKEN")
     git_setup()
-    # Récupérer la dernière version de la mémoire
     git_pull()
-    # Charger la mémoire
     load_memory()
 
     flask_thread = threading.Thread(target=run_flask)
