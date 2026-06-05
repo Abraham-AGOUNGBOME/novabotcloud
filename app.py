@@ -16,7 +16,7 @@ import re
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GIT_TOKEN = os.environ.get("GIT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")  # ex: https://novabotcloud.onrender.com
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -104,8 +104,9 @@ Règles strictes :
 """
 
 # ================= GESTION DES CONVERSATIONS =================
-conversations = defaultdict(list)
-last_activity = {}
+conversations = defaultdict(list)      # historique par chat_id
+last_activity = {}                     # timestamp du dernier message
+pending_admin_chat_id = None           # ID du prospect en attente de /dire
 
 def get_conversation_context(chat_id):
     msgs = conversations[chat_id]
@@ -122,6 +123,9 @@ def get_conversation_context(chat_id):
 def reset_conversation(chat_id):
     conversations.pop(chat_id, None)
     last_activity.pop(chat_id, None)
+    global pending_admin_chat_id
+    if pending_admin_chat_id == chat_id:
+        pending_admin_chat_id = None
 
 # ================= GROQ =================
 def call_groq(messages):
@@ -155,6 +159,10 @@ def process_message(user_text, chat_id, is_admin=False):
             messages.append({"role": "system", "content": f"Mémoire actuelle :\n{mem_context}"})
         messages.append({"role": "user", "content": user_text})
     else:
+        # Si le client est en attente de /dire, on le prévient et on ignore
+        global pending_admin_chat_id
+        if pending_admin_chat_id == chat_id:
+            return None  # On ne répond pas, l'admin doit d'abord utiliser /dire
         history = get_conversation_context(chat_id)
         system_prompt = CLIENT_PROMPT
         if history:
@@ -184,6 +192,7 @@ def handle_memo_action(response_text):
     return "\n".join(clean_lines)
 
 def handle_resume_action(response_text, chat_id):
+    global pending_admin_chat_id
     if "[RESUME]" in response_text:
         admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
         if admin_chat_id:
@@ -194,8 +203,10 @@ def handle_resume_action(response_text, chat_id):
                 msg = f"📩 Résumé prospect :\n{resume}"
                 if nouveaute:
                     msg += f"\n\n🆕 Nouveauté détectée : {nouveaute}\nSouhaitez-vous l'ajouter ? (/save ...)"
+                msg += f"\n\n💬 Pour répondre au prospect, utilisez /dire <message>"
                 bot.send_message(admin_chat_id, msg)
-                reset_conversation(chat_id)
+                # Mettre en attente (ne pas effacer l'historique)
+                pending_admin_chat_id = chat_id
     return response_text
 
 def detecter_nouveaute(resume_text):
@@ -252,7 +263,7 @@ def duckduckgo_search(query):
 def send_welcome(message):
     if is_authorized(message):
         bot.reply_to(message, """👑 Mode Administrateur Larry
-Commandes : /mem, /save, /scrape, /search, /pc
+Commandes : /mem, /save, /scrape, /search, /dire, /pc
 Larry est en ligne pour les clients.""")
     else:
         username = message.chat.username or message.chat.first_name or "vous"
@@ -309,10 +320,37 @@ def search_command(message):
 def pc_commands(message):
     bot.reply_to(message, "Commandes PC (à connecter) : /eteindre, /redemarrer, /ram, /screenshot")
 
+@bot.message_handler(commands=['dire'])
+@authorized_only
+def dire_command(message):
+    global pending_admin_chat_id
+    try:
+        # Extraire le texte après /dire
+        text = message.text.split(" ", 1)[1]
+    except IndexError:
+        bot.reply_to(message, "Usage : /dire <message à envoyer au prospect>")
+        return
+
+    if pending_admin_chat_id is None:
+        bot.reply_to(message, "Aucun prospect en attente de réponse.")
+        return
+
+    # Envoyer le message au prospect en attente
+    bot.send_message(pending_admin_chat_id, text)
+    bot.reply_to(message, f"✅ Message envoyé au prospect {pending_admin_chat_id}.")
+
+    # Réactiver la conversation (le prospect pourra reparler à Larry)
+    pending_admin_chat_id = None
+
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
     chat_id = str(message.chat.id)
     is_admin = is_authorized(message)
+
+    # Si le client est en attente et envoie un message, on le prévient
+    if not is_admin and pending_admin_chat_id == chat_id:
+        bot.reply_to(message, "Veuillez patienter, un conseiller va vous répondre personnellement.")
+        return
 
     if not is_admin:
         conversations[chat_id].append(("user", message.text))
@@ -322,6 +360,10 @@ def handle_all(message):
 
     bot.send_chat_action(message.chat.id, 'typing')
     response = process_message(message.text, chat_id, is_admin)
+
+    if response is None:
+        # Cas où le client est en attente (traité plus haut)
+        return
 
     if is_admin:
         response = handle_memo_action(response)
