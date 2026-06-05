@@ -5,15 +5,22 @@ from flask import Flask
 import threading
 import subprocess
 import time
+from bs4 import BeautifulSoup
+from apscheduler.schedulers.background import BackgroundScheduler
+import logging
 
 # ================= CONFIG =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GIT_TOKEN = os.environ.get("GIT_TOKEN")         # Token GitHub pour les pushs
+GIT_TOKEN = os.environ.get("GIT_TOKEN")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+logging.basicConfig(level=logging.INFO)
 
 # ================= MÉMOIRE PERSISTANTE =================
 MEMORY_DIR = "memory"
@@ -55,23 +62,29 @@ def save_memory(key):
         f.write(MEMORY[key])
     git_push()
 
-# ================= PROMPT SYSTÈME =================
-SYSTEM_PROMPT = """Tu es NovaBot, un agent IA de NovaTech-IA basé à Cotonou, Bénin.
-Tu aides à analyser des niches de marché, trouver des prospects, rédiger des messages de prospection et des posts Facebook.
-Tu as accès à une mémoire persistante :
-- cibles.md : cibles prioritaires
-- tarifs.md : tarifs
-- apprentissages.md : ce que tu as appris
+# ================= PROMPT AMÉLIORÉ =================
+SYSTEM_PROMPT = """Tu es NovaBot, l'agent commercial IA de NovaTech-IA, basé à Cotonou (Bénin).
+Ton rôle : aider à vendre des visites virtuelles 3D, des bots Telegram et de l'automatisation IA aux PME béninoises.
+Tu es proactif, concis et toujours orienté vers l'action commerciale.
 
-Quand une information importante doit être sauvegardée, termine ton message par :
-[MEMO:nom_du_fichier] contenu à ajouter
-Exemple : [MEMO:apprentissages] Fidjrossè montre un intérêt pour les visites 3D
+**Règles de comportement :**
+1. Quand l'utilisateur demande un message de prospection, tu génères un message prêt à envoyer, adapté au contexte local (français du Bénin, formules de politesse, référence aux quartiers).
+2. Tu t'appuies systématiquement sur les fichiers mémoire : cibles.md, tarifs.md, apprentissages.md.
+3. Si une information clé n'est pas dans la mémoire, tu le signales et proposes de l'ajouter via /save.
+4. Après chaque échange, tu proposes une action concrète : envoi d'un message, ajout d'une cible, relance d'un prospect.
+5. Tu analyses les opportunités : si un nouveau quartier ou type d'établissement est mentionné, tu suggères de l'ajouter aux cibles.
 
-Commandes disponibles pour l'utilisateur :
-/mem - affiche l'état actuel de la mémoire
-/save <fichier> <texte> - sauvegarde manuelle (fiable)
-/pc - liste les commandes PC
-Sois concis, professionnel, adapté au contexte béninois."""
+**Format de réponse :**
+- Toujours signer par "— NovaBot"
+- Si tu sauvegardes automatiquement une info, utilise la ligne [MEMO:fichier] contenu.
+- Sinon, termine par une question ouverte pour engager la suite.
+
+**Connaissance du marché béninois :**
+- Quartiers porteurs : Fidjrossè, Cadjehoun, Haie Vive, Ganhi, Zongo.
+- Budgets typiques : 75 000 - 120 000 FCFA pour un scan 3D.
+- Clients types : résidences meublées, hôtels boutique, agences immobilières.
+- Concurrence faible, argument principal : innovation et modernité.
+"""
 
 # ================= GROQ =================
 def call_groq(messages):
@@ -122,6 +135,50 @@ def handle_memo_action(response_text):
             clean_lines.append(line)
     return "\n".join(clean_lines)
 
+# ================= SCRAPING =================
+def scrape_annonces():
+    """Scrape Keur-immo Bénin et retourne les annonces filtrées par quartier."""
+    try:
+        url = "https://keur-immo.com/benin"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        resp = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # Sélecteurs à adapter si le site change (à vérifier une fois)
+        annonces = soup.select(".item-listing")  # ou ".listing-item"
+        nouvelles = []
+        quartiers_cibles = ["fidjrossè", "haie vive", "cadjèhoun", "akpakpa", "ganhi", "zongo", "calavi"]
+        
+        for annonce in annonces[:10]:  # Limiter à 10 annonces pour la performance
+            titre_elem = annonce.select_one("h2") or annonce.select_one(".titre")
+            prix_elem = annonce.select_one(".price") or annonce.select_one(".prix")
+            lien_elem = annonce.select_one("a")
+            localisation_elem = annonce.select_one(".location") or annonce.select_one(".ville")
+            
+            titre = titre_elem.text.strip() if titre_elem else "Sans titre"
+            prix = prix_elem.text.strip() if prix_elem else "N/C"
+            lien = lien_elem["href"] if lien_elem and lien_elem.get("href") else ""
+            localisation = localisation_elem.text.strip().lower() if localisation_elem else ""
+            
+            # Filtre par quartier
+            if any(q in localisation for q in quartiers_cibles):
+                nouvelles.append(f"🏠 {titre}\n💰 {prix}\n📍 {localisation.title()}\n🔗 {lien}\n")
+        
+        return "\n".join(nouvelles) if nouvelles else "Aucune annonce pertinente trouvée aujourd'hui."
+    except Exception as e:
+        return f"Erreur de scraping : {str(e)}"
+
+def job_quotidien():
+    chat_id = os.environ.get("ADMIN_CHAT_ID")
+    if not chat_id:
+        logging.warning("ADMIN_CHAT_ID non défini, impossible d'envoyer le rapport.")
+        return
+    rapport = scrape_annonces()
+    bot.send_message(chat_id, f"📊 Rapport quotidien des annonces :\n\n{rapport}")
+
+# Planification : tous les jours à 7h00 UTC+1 (heure de Cotonou)
+scheduler.add_job(job_quotidien, 'cron', hour=7, minute=0, timezone='Africa/Porto-Novo')
+
 # ================= COMMANDES TELEGRAM =================
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
@@ -131,6 +188,7 @@ Commandes :
 /mem - voir la mémoire
 /save <fichier> <texte> - sauvegarder une info
 /pc - commandes PC
+/scrape - lancer un scraping manuel (test)
 
 Posez-moi directement une question.""")
 
@@ -149,8 +207,6 @@ def pc_commands(message):
 
 @bot.message_handler(commands=['save'])
 def save_memory_command(message):
-    """Sauvegarde manuelle dans un fichier mémoire.
-    Usage : /save cibles Le texte à ajouter"""
     try:
         parts = message.text.split(" ", 2)
         if len(parts) < 3:
@@ -166,6 +222,12 @@ def save_memory_command(message):
         bot.reply_to(message, f"✅ Ajouté à {key}.md")
     except Exception as e:
         bot.reply_to(message, f"Erreur : {str(e)}")
+
+@bot.message_handler(commands=['scrape'])
+def scrape_manuel(message):
+    bot.send_chat_action(message.chat.id, 'typing')
+    rapport = scrape_annonces()
+    bot.reply_to(message, rapport)
 
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
