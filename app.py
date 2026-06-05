@@ -3,16 +3,20 @@ import requests
 import telebot
 from flask import Flask
 import threading
+import subprocess
+import time
 
 # ================= CONFIG =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+GIT_TOKEN = os.environ.get("GIT_TOKEN")
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# ================= MÉMOIRE =================
+# ================= MÉMOIRE PERSISTANTE =================
+MEMORY_DIR = "memory"
 FILES = {
     "cibles": "cibles.md",
     "tarifs": "tarifs.md",
@@ -20,19 +24,45 @@ FILES = {
 }
 MEMORY = {}
 
+def git_setup():
+    """Configure git avec le token pour les pushs automatiques."""
+    repo_url = f"https://{GIT_TOKEN}@github.com/Abraham-AGOUNGBOME/novabotcloud.git"
+    subprocess.run(["git", "remote", "set-url", "origin", repo_url], capture_output=True)
+    subprocess.run(["git", "config", "user.email", "novabot@novatech.bj"], capture_output=True)
+    subprocess.run(["git", "config", "user.name", "NovaBot"], capture_output=True)
+
+def git_pull():
+    """Récupère les derniers changements depuis GitHub."""
+    subprocess.run(["git", "pull", "origin", "main"], capture_output=True)
+
+def git_push():
+    """Commit et push les modifications des fichiers mémoire."""
+    # Ajouter seulement les fichiers du dossier memory
+    subprocess.run(["git", "add", f"{MEMORY_DIR}/*.md"], capture_output=True)
+    # Commit avec message horodaté
+    commit_msg = f"Memory update {time.strftime('%Y-%m-%d %H:%M:%S')}"
+    subprocess.run(["git", "commit", "-m", commit_msg], capture_output=True)
+    # Push
+    subprocess.run(["git", "push", "origin", "main"], capture_output=True)
+
 def load_memory():
+    """Charge les fichiers .md depuis le dossier memory."""
+    os.makedirs(MEMORY_DIR, exist_ok=True)
     for key, filename in FILES.items():
+        filepath = os.path.join(MEMORY_DIR, filename)
         try:
-            with open(filename, "r", encoding="utf-8") as f:
+            with open(filepath, "r", encoding="utf-8") as f:
                 MEMORY[key] = f.read()
         except FileNotFoundError:
             MEMORY[key] = ""
 
 def save_memory(key):
-    with open(FILES[key], "w", encoding="utf-8") as f:
+    """Sauvegarde un fichier mémoire localement et pousse vers GitHub."""
+    filepath = os.path.join(MEMORY_DIR, FILES[key])
+    with open(filepath, "w", encoding="utf-8") as f:
         f.write(MEMORY[key])
-
-load_memory()
+    # Pousser sur GitHub
+    git_push()
 
 # ================= PROMPT SYSTÈME =================
 SYSTEM_PROMPT = """Tu es NovaBot, un agent IA de NovaTech-IA basé à Cotonou, Bénin.
@@ -48,8 +78,7 @@ Exemple : [MEMO:apprentissages] Fidjrossè montre un intérêt pour les visites 
 
 Commandes disponibles pour l'utilisateur :
 /mem - affiche l'état actuel de la mémoire
-/pc - liste les commandes PC (éteindre, redémarrer...) si disponibles
-
+/pc - liste les commandes PC
 Sois concis, professionnel, adapté au contexte béninois."""
 
 # ================= DEEPSEEK =================
@@ -90,7 +119,6 @@ def handle_memo_action(response_text):
     for line in lines:
         if line.startswith("[MEMO:"):
             try:
-                # Extraction de la clé et du contenu
                 after_bracket = line[len("[MEMO:"):]
                 key, value = after_bracket.split("]", 1)
                 key = key.strip()
@@ -99,7 +127,6 @@ def handle_memo_action(response_text):
                     save_memory(key)
             except:
                 pass
-            # On n'ajoute pas la ligne [MEMO:...] à la réponse visible
         else:
             clean_lines.append(line)
     return "\n".join(clean_lines)
@@ -139,10 +166,15 @@ def run_flask():
 
 # ================= LANCEMENT =================
 if __name__ == '__main__':
-    # Démarrer Flask dans un thread pour que le polling tourne
+    # Configuration git
+    git_setup()
+    # Récupérer la dernière version de la mémoire
+    git_pull()
+    # Charger la mémoire
+    load_memory()
+
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
 
-    # Polling Telegram (infini)
     bot.infinity_polling()
