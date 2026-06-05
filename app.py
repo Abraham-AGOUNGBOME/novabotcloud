@@ -201,13 +201,11 @@ def handle_resume_action(response_text, chat_id):
             match = re.search(r"\[RESUME\](.*?)\[FIN RESUME\]", response_text, re.DOTALL)
             if match:
                 resume = match.group(1).strip()
-                # Détection nouveauté
                 nouveaute = detecter_nouveaute(resume)
                 msg = f"📩 Résumé prospect :\n{resume}"
                 if nouveaute:
                     msg += f"\n\n🆕 Nouveauté détectée : {nouveaute}\nSouhaitez-vous l'ajouter ? (/save ...)"
                 bot.send_message(admin_chat_id, msg)
-                # Réinitialiser la conversation après résumé
                 reset_conversation(chat_id)
     return response_text
 
@@ -242,15 +240,29 @@ def job_quotidien():
 
 scheduler.add_job(job_quotidien, 'cron', hour=7, minute=0, timezone='Africa/Porto-Novo')
 
-# ================= RECHERCHE =================
+# ================= RECHERCHE DUCKDUCKGO CORRIGÉE =================
 def duckduckgo_search(query):
     try:
         url = "https://api.duckduckgo.com/"
         params = {"q": query, "format": "json", "no_html": 1, "skip_disambig": 1}
         resp = requests.get(url, params=params, timeout=10)
         data = resp.json()
-        abstract = data.get("AbstractText") or data.get("RelatedTopics", [{}])[0].get("Text", "")
-        return abstract or "Aucune information trouvée."
+        
+        # Essayer le résumé principal
+        abstract = data.get("AbstractText", "")
+        if abstract:
+            return abstract[:500]  # Limiter la longueur
+        
+        # Sinon, chercher dans les sujets liés
+        related = data.get("RelatedTopics", [])
+        if related and isinstance(related[0], dict):
+            first_text = related[0].get("Text", "")
+            if first_text:
+                # Nettoyer les balises HTML éventuelles
+                soup = BeautifulSoup(first_text, "html.parser")
+                return soup.get_text()[:500]
+        
+        return "Aucune information trouvée pour cette recherche."
     except Exception as e:
         return f"Erreur recherche : {e}"
 
@@ -322,7 +334,6 @@ def handle_all(message):
     chat_id = str(message.chat.id)
     is_admin = is_authorized(message)
 
-    # Mise à jour de l'historique pour les clients
     if not is_admin:
         conversations[chat_id].append(("user", message.text))
         if len(conversations[chat_id]) > 10:
@@ -336,9 +347,7 @@ def handle_all(message):
         response = handle_memo_action(response)
     else:
         conversations[chat_id].append(("bot", response))
-        # Nettoyer la réponse de tout résumé avant de l'envoyer au client
         response_clean = re.sub(r"\[RESUME\].*?\[FIN RESUME\]", "", response, flags=re.DOTALL).strip()
-        # Transmettre le résumé à l'admin si présent
         handle_resume_action(response, chat_id)
         response = response_clean
 
