@@ -87,14 +87,8 @@ def save_memory(key):
 ADMIN_PROMPT = """Tu es NovaBot, l'assistant administratif de Larry (l'agent commercial de NovaTech-IA, Cotonou, Bénin).
 Tu aides l'administrateur à gérer le business : analyse de marché, rédaction de messages de prospection, suivi des cibles.
 Tu as accès à la mémoire (cibles, tarifs, apprentissages).
-
-RÈGLES STRICTES :
-1. Si l'administrateur te demande une information récente ou une tendance actuelle (ex: "tendances", "dernières news", "contacts", "donne-moi des sources"), tu DOIS utiliser l'outil search_web pour chercher sur le web. Ne réponds jamais sans avoir d'abord effectué une recherche si la question concerne des faits récents ou des données externes.
-2. Si les résultats de recherche sont insuffisants ou vides, ne relance pas l'outil. Contente-toi de dire que la recherche n'a rien donné et suggère d'autres pistes.
-3. Compile toujours les résultats de manière structurée, avec les sources.
-4. Si tu as déjà la réponse dans la mémoire (cibles, tarifs, apprentissages), utilise-la d'abord.
-5. Quand c'est pertinent, termine par [MEMO:fichier] contenu pour sauvegarder automatiquement.
-Sois concis et orienté action.
+Quand tu reçois des résultats de recherche web, utilise-les pour répondre avec des sources.
+Sois concis et orienté action. Termine par [MEMO:fichier] si pertinent.
 """
 
 CLIENT_PROMPT = """Tu es Larry, un assistant commercial amical et professionnel représentant NovaTech-IA, une entreprise spécialisée dans les visites virtuelles 3D pour l'immobilier, basée à Cotonou, Bénin.
@@ -111,7 +105,7 @@ Règles strictes :
 - Sois chaleureux mais concis. Parle comme un conseiller local, avec des références aux quartiers de Cotonou (Fidjrossè, Haie Vive, etc.) quand c'est pertinent.
 """
 
-# ================= OUTILS AGENT =================
+# ================= OUTILS DE RECHERCHE (appelés directement) =================
 def search_web(query, max_results=5):
     try:
         with DDGS() as ddgs:
@@ -138,49 +132,6 @@ def fetch_page(url):
     except Exception as e:
         return f"Erreur récupération page : {str(e)}"
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_web",
-            "description": "Recherche sur le web via DuckDuckGo et renvoie une liste de résultats (titre, extrait, URL). Si la recherche ne donne rien, le résultat contiendra 'Aucun résultat trouvé'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "La requête de recherche"},
-                    "max_results": {"type": "integer", "description": "Nombre maximum de résultats (défaut 5)"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_page",
-            "description": "Récupère le contenu textuel d'une page web à partir de son URL.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "L'URL de la page à récupérer"}
-                },
-                "required": ["url"]
-            }
-        }
-    }
-]
-
-def execute_function_call(function_name, arguments):
-    if function_name == "search_web":
-        query = arguments.get("query", "")
-        max_results = arguments.get("max_results", 5)
-        return search_web(query, max_results)
-    elif function_name == "fetch_page":
-        url = arguments.get("url", "")
-        return fetch_page(url)
-    else:
-        return {"error": f"Fonction inconnue : {function_name}"}
-
 # ================= GESTION DES CONVERSATIONS =================
 conversations = defaultdict(list)
 last_activity = {}
@@ -205,84 +156,74 @@ def reset_conversation(chat_id):
     if pending_admin_chat_id == chat_id:
         pending_admin_chat_id = None
 
-# ================= GROQ AVEC GESTION 429 =================
-def call_groq_with_tools(messages, tools=None, max_iterations=2):
-    """Appelle Groq avec une boucle d'outils, mais s'arrête après max_iterations tentatives."""
-    for i in range(max_iterations):
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "llama-3.1-8b-instant",
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 1000
-        }
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+# ================= APPEL SIMPLE À GROQ =================
+def simple_groq_call(messages, max_tokens=1000):
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.1-8b-instant",
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": max_tokens
+    }
+    try:
+        resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"Erreur API Groq : {str(e)}"
 
-        try:
-            resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
-            if resp.status_code == 429:
-                time.sleep(5)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            message = data["choices"][0]["message"]
-
-            if "tool_calls" in message:
-                messages.append(message)
-                for tool_call in message["tool_calls"]:
-                    function_name = tool_call["function"]["name"]
-                    arguments = json.loads(tool_call["function"]["arguments"])
-                    result = execute_function_call(function_name, arguments)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "name": function_name,
-                        "content": json.dumps(result, ensure_ascii=False)
-                    })
-                time.sleep(1)  # Pause courte entre appels
-                continue
-            else:
-                return message["content"]
-        except Exception as e:
-            if "429" in str(e):
-                time.sleep(5)
-                continue
-            return f"Erreur API Groq : {str(e)}"
-    return "Désolé, je n'ai pas pu accomplir la tâche (limite de tentatives atteinte)."
-
+# ================= TRAITEMENT DES MESSAGES =================
 def process_message(user_text, chat_id, is_admin=False):
     if is_admin:
+        # Charger la mémoire
         mem_context = ""
         for key, content in MEMORY.items():
             if content.strip():
                 mem_context += f"=== {key}.md ===\n{content}\n\n"
-        messages = [
-            {"role": "system", "content": ADMIN_PROMPT},
-        ]
-        if mem_context:
-            messages.append({"role": "system", "content": f"Mémoire actuelle :\n{mem_context}"})
-        messages.append({"role": "user", "content": user_text})
-        
-        # Premier essai (max 2 itérations)
-        response = call_groq_with_tools(messages, TOOLS, max_iterations=2)
-        
-        # Si la réponse ne contient pas d'URL ni de mention d'échec, on relance une seule fois avec ordre explicite
+
         low_user = user_text.lower()
-        low_resp = response.lower()
-        if any(kw in low_user for kw in ["tendance", "contact", "source", "cherche", "trouve", "donne-moi", "scrape"]) \
-           and "http" not in low_resp and "source" not in low_resp and "limite" not in low_resp:
-            messages.append({"role": "assistant", "content": response})
-            messages.append({"role": "user", "content": "Utilise immédiatement l'outil search_web pour chercher cette information. Si aucun résultat, dis-le simplement."})
-            # Une seule itération pour cette relance forcée
-            response = call_groq_with_tools(messages, TOOLS, max_iterations=1)
-        
-        return response
+        need_search = any(kw in low_user for kw in [
+            "tendance", "contact", "source", "cherche", "trouve",
+            "donne-moi", "scrape", "actualité", "récent", "dernier"
+        ])
+
+        if need_search:
+            results = search_web(user_text)
+            if not results or "error" in results[0]:
+                return "Désolé, la recherche web n'a donné aucun résultat."
+
+            # Construire un prompt de résumé
+            results_str = json.dumps(results, ensure_ascii=False, indent=2)[:2500]
+            prompt = f"""Voici les résultats d'une recherche web pour : "{user_text}".
+Rédige une réponse concise qui résume les informations trouvées, en citant les sources (URLs).
+Si les résultats ne sont pas pertinents, dis-le poliment.
+
+Résultats :
+{results_str}
+
+Réponse :"""
+            messages = [
+                {"role": "system", "content": ADMIN_PROMPT},
+            ]
+            if mem_context:
+                messages.append({"role": "system", "content": f"Mémoire actuelle :\n{mem_context}"})
+            messages.append({"role": "user", "content": prompt})
+            return simple_groq_call(messages, max_tokens=600)
+
+        else:
+            # Pas de recherche nécessaire
+            messages = [
+                {"role": "system", "content": ADMIN_PROMPT},
+            ]
+            if mem_context:
+                messages.append({"role": "system", "content": f"Mémoire actuelle :\n{mem_context}"})
+            messages.append({"role": "user", "content": user_text})
+            return simple_groq_call(messages)
     else:
+        # Mode client Larry
         if pending_admin_chat_id == chat_id:
             return None
         history = get_conversation_context(chat_id)
@@ -293,22 +234,7 @@ def process_message(user_text, chat_id, is_admin=False):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text}
         ]
-        try:
-            headers = {
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "llama-3.1-8b-instant",
-                "messages": messages,
-                "temperature": 0.7,
-                "max_tokens": 1000
-            }
-            resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            return f"Erreur API Groq : {str(e)}"
+        return simple_groq_call(messages)
 
 def handle_memo_action(response_text):
     lines = response_text.split("\n")
@@ -364,27 +290,18 @@ def detecter_nouveaute(resume_text):
 # ================= SCRAPING IA =================
 def scrape_annonces():
     url = "https://keur-immo.com/benin"
-    try:
-        page_text = fetch_page(url)
-        if page_text.startswith("Erreur"):
-            return page_text
-        prompt = f"""
-Voici le contenu textuel de la page {url} (site d'annonces immobilières au Bénin).
-Extrais les annonces qui concernent des appartements, villas ou résidences meublées situés à Cotonou (quartiers : Fidjrossè, Haie Vive, Cadjehoun, Ganhi, Zongo, Akpakpa).
-Pour chaque annonce, donne le titre, le prix, la localisation et le lien (si trouvable).
-Format :
-🏠 Titre
-💰 Prix
-📍 Localisation
-🔗 Lien
-Si aucune annonce ne correspond, réponds "Aucune annonce pertinente trouvée."
-Contenu de la page :
+    page_text = fetch_page(url)
+    if page_text.startswith("Erreur"):
+        return page_text
+    prompt = f"""
+Voici le contenu textuel de la page {url}.
+Extrais les annonces immobilières à Cotonou (Fidjrossè, Haie Vive, etc.).
+Format : 🏠 Titre / 💰 Prix / 📍 Localisation / 🔗 Lien
+Si aucune annonce, réponds "Aucune annonce pertinente trouvée."
+
 {page_text[:4000]}
 """
-        messages = [{"role": "user", "content": prompt}]
-        return call_groq_with_tools(messages, tools=[], max_iterations=1)
-    except Exception as e:
-        return f"Erreur scraping IA : {str(e)}"
+    return simple_groq_call([{"role": "user", "content": prompt}], max_tokens=500)
 
 def job_quotidien():
     chat_id = os.environ.get("ADMIN_CHAT_ID")
@@ -402,7 +319,7 @@ def send_welcome(message):
         bot.reply_to(message, """👑 Mode Administrateur Larry
 Commandes : /mem, /save, /scrape, /search, /dire, /pc
 Larry est en ligne pour les clients.
-Pour une mission complexe, décrivez simplement ce que vous voulez (ex: 'trouve-moi 5 contacts de promoteurs à Cotonou').""")
+Pour une recherche, décrivez simplement ce que vous cherchez (ex: 'tendances visite 3D').""")
     else:
         username = message.chat.username or message.chat.first_name or "vous"
         bot.reply_to(message, f"Bonjour {username}, je suis Larry, conseiller chez NovaTech-IA. Comment puis-je vous aider aujourd'hui ?")
@@ -473,11 +390,9 @@ def dire_command(message):
     except IndexError:
         bot.reply_to(message, "Usage : /dire <message à envoyer au prospect>")
         return
-
     if pending_admin_chat_id is None:
         bot.reply_to(message, "Aucun prospect en attente de réponse.")
         return
-
     bot.send_message(pending_admin_chat_id, text)
     bot.reply_to(message, f"✅ Message envoyé au prospect {pending_admin_chat_id}.")
     pending_admin_chat_id = None
