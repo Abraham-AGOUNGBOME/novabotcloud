@@ -90,7 +90,7 @@ Tu as accès à la mémoire (cibles, tarifs, apprentissages).
 
 RÈGLES STRICTES :
 1. Si l'administrateur te demande une information récente ou une tendance actuelle (ex: "tendances", "dernières news", "contacts", "donne-moi des sources"), tu DOIS utiliser l'outil search_web pour chercher sur le web. Ne réponds jamais sans avoir d'abord effectué une recherche si la question concerne des faits récents ou des données externes.
-2. Si les résultats de recherche sont insuffisants, tu peux utiliser fetch_page pour lire le contenu des pages trouvées.
+2. Si les résultats de recherche sont insuffisants ou vides, ne relance pas l'outil. Contente-toi de dire que la recherche n'a rien donné et suggère d'autres pistes.
 3. Compile toujours les résultats de manière structurée, avec les sources.
 4. Si tu as déjà la réponse dans la mémoire (cibles, tarifs, apprentissages), utilise-la d'abord.
 5. Quand c'est pertinent, termine par [MEMO:fichier] contenu pour sauvegarder automatiquement.
@@ -143,7 +143,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "Recherche sur le web via DuckDuckGo et renvoie une liste de résultats (titre, extrait, URL).",
+            "description": "Recherche sur le web via DuckDuckGo et renvoie une liste de résultats (titre, extrait, URL). Si la recherche ne donne rien, le résultat contiendra 'Aucun résultat trouvé'.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -206,7 +206,8 @@ def reset_conversation(chat_id):
         pending_admin_chat_id = None
 
 # ================= GROQ AVEC GESTION 429 =================
-def call_groq_with_tools(messages, tools=None, max_iterations=3):
+def call_groq_with_tools(messages, tools=None, max_iterations=2):
+    """Appelle Groq avec une boucle d'outils, mais s'arrête après max_iterations tentatives."""
     for i in range(max_iterations):
         headers = {
             "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -243,7 +244,7 @@ def call_groq_with_tools(messages, tools=None, max_iterations=3):
                         "name": function_name,
                         "content": json.dumps(result, ensure_ascii=False)
                     })
-                time.sleep(2)
+                time.sleep(1)  # Pause courte entre appels
                 continue
             else:
                 return message["content"]
@@ -267,18 +268,18 @@ def process_message(user_text, chat_id, is_admin=False):
             messages.append({"role": "system", "content": f"Mémoire actuelle :\n{mem_context}"})
         messages.append({"role": "user", "content": user_text})
         
-        # Premier essai avec outils
-        response = call_groq_with_tools(messages, TOOLS)
+        # Premier essai (max 2 itérations)
+        response = call_groq_with_tools(messages, TOOLS, max_iterations=2)
         
-        # Si la réponse ne semble pas contenir de recherche alors que c'est nécessaire, on force
+        # Si la réponse ne contient pas d'URL ni de mention d'échec, on relance une seule fois avec ordre explicite
         low_user = user_text.lower()
         low_resp = response.lower()
         if any(kw in low_user for kw in ["tendance", "contact", "source", "cherche", "trouve", "donne-moi", "scrape"]) \
-           and "http" not in low_resp and "source" not in low_resp:
-            # Relancer avec une instruction explicite
+           and "http" not in low_resp and "source" not in low_resp and "limite" not in low_resp:
             messages.append({"role": "assistant", "content": response})
-            messages.append({"role": "user", "content": "Utilise immédiatement l'outil search_web pour chercher cette information. Donne les résultats avec les URLs."})
-            response = call_groq_with_tools(messages, TOOLS)
+            messages.append({"role": "user", "content": "Utilise immédiatement l'outil search_web pour chercher cette information. Si aucun résultat, dis-le simplement."})
+            # Une seule itération pour cette relance forcée
+            response = call_groq_with_tools(messages, TOOLS, max_iterations=1)
         
         return response
     else:
@@ -381,7 +382,7 @@ Contenu de la page :
 {page_text[:4000]}
 """
         messages = [{"role": "user", "content": prompt}]
-        return call_groq_with_tools(messages, tools=[])
+        return call_groq_with_tools(messages, tools=[], max_iterations=1)
     except Exception as e:
         return f"Erreur scraping IA : {str(e)}"
 
