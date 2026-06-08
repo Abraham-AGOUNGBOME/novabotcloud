@@ -43,50 +43,60 @@ def authorized_only(func):
         return func(message, *args, **kwargs)
     return wrapper
 
-# ================= MÉMOIRE PERSISTANTE MULTI-AGENTS =================
+# ================= MÉMOIRE PARTAGÉE ET MULTI-AGENTS =================
 MEMORY_DIR = "memory"
+SHARED_FILES = ["cibles.md", "tarifs.md", "apprentissages.md"]
 AGENTS = {
     "NovaBot": {
         "prompt": """Tu es NovaBot, l'assistant administratif central de NovaTech-IA, Cotonou, Bénin.
 Tu supervises les autres agents (Market, Créa, Coco, Larry) et tu prends les décisions finales.
-Tu as accès à toutes les mémoires. Sois concis et orienté action.""",
+Tu as accès à toutes les mémoires. Sois concis et orienté action.
+Quand tu reçois les résultats d'autres agents, vérifie leur cohérence avant de répondre.""",
         "memory_file": "novabot_memory.md",
         "description": "Assistant principal, gestion administrative, supervision"
     },
     "Market": {
         "prompt": """Tu es Market, l'agent d'analyse de marché et de tendances.
 Tu cherches sur le web, analyses les données, et fournis des rapports avec sources.
-Utilise l'outil search_web quand nécessaire. Sois précis et chiffré.""",
+Utilise l'outil search_web quand nécessaire. Sois précis et chiffré.
+Respecte scrupuleusement le contexte de NovaTech-IA : localisation Cotonou, Bénin, secteur des visites 3D immobilières.""",
         "memory_file": "market_memory.md",
         "description": "Recherche de tendances, analyse de marché, veille concurrentielle"
     },
     "Créa": {
         "prompt": """Tu es Créa, l'agent créatif de NovaTech-IA.
 Tu rédiges des posts Facebook, des messages de prospection, des accroches marketing.
-Ton style est punchy, moderne, adapté au public béninois. Pas de blabla corporate.""",
+Ton style est punchy, moderne, adapté au public béninois. Pas de blabla corporate.
+Utilise toujours les tarifs officiels (scan standard 75 000 FCFA, premium 120 000 FCFA) et mentionne uniquement le Bénin.
+Ne parle jamais d'un autre pays que le Bénin.""",
         "memory_file": "crea_memory.md",
         "description": "Création de contenu, rédaction marketing, posts réseaux sociaux"
     },
     "Coco": {
         "prompt": """Tu es Coco, le comptable de NovaTech-IA.
 Tu gères les tarifs, les devis, la rentabilité. Tu calcules les marges et suis les revenus.
-Sois rigoureux et transparent.""",
+Sois rigoureux et transparent. Tous les montants sont en FCFA.
+Coûts à connaître : scan 3D standard (prix de vente 75 000 FCFA), premium (120 000 FCFA), hébergement mensuel (5 000 FCFA/mois).
+Le coût de revient approximatif est de 25 000 FCFA pour un scan standard (temps, déplacement, logiciel).""",
         "memory_file": "coco_memory.md",
         "description": "Comptabilité, tarifs, devis, suivi financier"
     },
     "Larry": {
         "prompt": """Tu es Larry, l'agent commercial pour les visites 3D.
 Tu parles aux clients potentiels, tu les qualifies, tu ne forces jamais.
-Ne mentionne pas les autres agents. Reste chaleureux et professionnel.""",
+Ne mentionne pas les autres agents. Reste chaleureux et professionnel.
+Service : visites virtuelles 3D pour immobilier à Cotonou (Fidjrossè, Haie Vive, etc.).""",
         "memory_file": "larry_memory.md",
         "description": "Vente et qualification de prospects pour visites 3D"
     }
 }
-# Mémoire chargée pour chaque agent
-MEMORY = {}
+
+MEMORY = {}          # mémoire individuelle des agents
+SHARED_MEMORY = {}   # mémoire commune (cibles, tarifs, apprentissages)
 
 def load_all_memory():
     os.makedirs(MEMORY_DIR, exist_ok=True)
+    # Mémoires individuelles
     for agent_name, cfg in AGENTS.items():
         filepath = os.path.join(MEMORY_DIR, cfg["memory_file"])
         try:
@@ -94,7 +104,16 @@ def load_all_memory():
                 MEMORY[agent_name] = f.read()
         except FileNotFoundError:
             MEMORY[agent_name] = ""
-            # Créer le fichier vide
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write("")
+    # Mémoire partagée
+    for fname in SHARED_FILES:
+        filepath = os.path.join(MEMORY_DIR, fname)
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                SHARED_MEMORY[fname.replace(".md", "")] = f.read()
+        except FileNotFoundError:
+            SHARED_MEMORY[fname.replace(".md", "")] = ""
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write("")
 
@@ -180,84 +199,121 @@ def simple_groq_call(messages, max_tokens=1000):
     except Exception as e:
         return f"Erreur API Groq : {str(e)}"
 
-# ================= ORCHESTRATEUR (choix automatique des agents) =================
-def orchestrate(user_text, mem_context):
-    # Demander à Groq quel agent utiliser
+# ================= HARNAIS DE VÉRIFICATION =================
+def verify_output(agent_name, output):
+    """Vérifie la cohérence de la sortie d'un agent (pas d'autre pays, bons tarifs)."""
+    prompt = f"""Tu es un vérificateur qualité pour NovaTech-IA (Cotonou, Bénin).
+Analyse cette sortie produite par l'agent {agent_name}.
+Contexte de l'entreprise :
+- Pays : Bénin (jamais un autre pays)
+- Services : visites virtuelles 3D immobilières uniquement
+- Tarifs exacts : Scan 3D standard 75 000 FCFA, premium 120 000 FCFA, hébergement 5 000 FCFA/mois
+
+Règles :
+- Si la sortie mentionne un autre pays, une autre devise, ou des prix incorrects, réponds "PROBLÈME : <description>".
+- Si tout est correct, réponds "OK".
+
+Sortie à vérifier :
+{output[:1500]}
+"""
+    resp = simple_groq_call([{"role": "user", "content": prompt}], max_tokens=100)
+    if "OK" in resp:
+        return output
+    else:
+        # Demander une correction à l'agent
+        correction_prompt = f"""Ta sortie précédente a été rejetée pour le motif suivant :
+{resp}
+Corrige-la en respectant les informations réelles de l'entreprise (Bénin, tarifs exacts, services 3D).
+Sortie rejetée :
+{output[:1000]}
+Nouvelle version corrigée :"""
+        corrected = simple_groq_call([{"role": "user", "content": correction_prompt}], max_tokens=1000)
+        return corrected
+
+def validate_plan(plan, user_text):
+    """Demande à NovaBot si la séquence d'agents est pertinente."""
+    prompt = f"""En tant que superviseur, valide ce plan d'action pour la demande : "{user_text}"
+Plan proposé : {plan}
+Réponds "OK" si c'est adapté, sinon propose une meilleure séquence d'agents (séparés par ->)."""
+    resp = simple_groq_call([{"role": "user", "content": prompt}], max_tokens=50)
+    return "OK" in resp
+
+def orchestrate(user_text, shared_context):
+    """Choisit le(s) agent(s) le(s) plus adapté(s) à la demande."""
     agent_list = "\n".join([f"- {name}: {cfg['description']}" for name, cfg in AGENTS.items()])
     prompt = f"""Tu es un aiguilleur automatique. Analyse le message utilisateur et décide quel agent doit répondre.
 Agents disponibles :
 {agent_list}
 
 Règles :
-- Si le message concerne une recherche, une tendance, une analyse, choisis "Market".
-- Si le message demande un contenu créatif, un post Facebook, un message de prospection, choisis "Créa".
-- Si le message parle d'argent, de tarifs, de devis, de comptabilité, choisis "Coco".
-- Si c'est une conversation commerciale avec un prospect (qualification, vente 3D), choisis "Larry".
-- Si c'est une demande administrative, de gestion, ou de supervision, choisis "NovaBot".
-- Si la tâche nécessite plusieurs étapes, propose une séquence d'agents dans l'ordre, ex: Market -> Créa.
+- Recherche, tendances, analyse → Market
+- Contenu créatif, post Facebook, message prospection → Créa
+- Argent, tarifs, devis, comptabilité → Coco
+- Conversation commerciale avec un prospect → Larry
+- Supervision, coordination, demande administrative → NovaBot
+- Si la tâche nécessite plusieurs étapes, donne une séquence avec -> (ex: Market -> Créa).
 
-Réponds UNIQUEMENT par le nom de l'agent ou une séquence avec -> (ex: "Market" ou "Market -> Créa"). Pas de phrase supplémentaire.
+Réponds UNIQUEMENT par le nom de l'agent ou une séquence (ex: "Market" ou "Market -> Créa").
 Message utilisateur : {user_text}
 """
-    decision = simple_groq_call([{"role": "user", "content": prompt}], max_tokens=50).strip()
-    return decision
+    return simple_groq_call([{"role": "user", "content": prompt}], max_tokens=50).strip()
 
+# ================= TRAITEMENT ADMIN MULTI-AGENTS =================
 def process_admin_message(user_text):
-    """Traite un message admin en mode multi-agents automatique."""
-    # Mémoire de NovaBot (administrateur)
-    mem_context = MEMORY.get("NovaBot", "")
+    shared_context = ""
+    for key, content in SHARED_MEMORY.items():
+        if content.strip():
+            shared_context += f"=== {key}.md ===\n{content}\n\n"
 
-    # 1. Décider quel agent utiliser
-    plan = orchestrate(user_text, mem_context)
-    logging.info(f"Plan d'agents: {plan}")
+    # 1. Planification
+    plan = orchestrate(user_text, shared_context)
+    # 2. Validation du plan
+    if not validate_plan(plan, user_text):
+        return "Le plan proposé n'a pas été validé par le superviseur. Veuillez reformuler votre demande."
 
-    # Si le plan contient "->", c'est une séquence
-    if "->" in plan:
-        agents_to_call = [a.strip() for a in plan.split("->")]
-    else:
-        agents_to_call = [plan.strip()]
-
-    # 2. Exécuter les agents dans l'ordre
-    context = user_text  # le message original
+    agents_to_call = [a.strip() for a in plan.split("->")] if "->" in plan else [plan.strip()]
+    context = user_text
     responses = []
+
     for agent_name in agents_to_call:
         if agent_name not in AGENTS:
-            # Agent inconnu, on utilise NovaBot par défaut
             agent_name = "NovaBot"
-        # Construire les messages pour cet agent
+
+        # Prompt enrichi avec la mémoire partagée et individuelle
+        agent_prompt = AGENTS[agent_name]["prompt"] + f"\n\nContexte partagé de NovaTech-IA :\n{shared_context}"
         agent_memory = MEMORY.get(agent_name, "")
-        agent_prompt = AGENTS[agent_name]["prompt"]
-        messages = [
-            {"role": "system", "content": agent_prompt},
-        ]
+        messages = [{"role": "system", "content": agent_prompt}]
         if agent_memory:
-            messages.append({"role": "system", "content": f"Mémoire de {agent_name} :\n{agent_memory}"})
-        # Si ce n'est pas le premier agent, on ajoute le résultat précédent
+            messages.append({"role": "system", "content": f"Mémoire personnelle de {agent_name} :\n{agent_memory}"})
+
+        # Passage du contexte précédent si pipeline
         if len(responses) > 0:
             context = f"Contexte précédent : {responses[-1]}\n\nTâche : {user_text}"
         else:
             context = user_text
         messages.append({"role": "user", "content": context})
-        resp = simple_groq_call(messages)
-        responses.append(resp)
-        # Sauvegarder dans la mémoire de l'agent si celui-ci a utilisé [MEMO:...]
-        resp = handle_memo_action(resp, agent_name)  # adapté pour agent spécifique
 
-    # 3. Retourner la dernière réponse (ou une combinaison)
+        resp = simple_groq_call(messages)
+        # Vérification de la sortie
+        resp = verify_output(agent_name, resp)
+        responses.append(resp)
+        # Sauvegarde mémoire automatique
+        resp = handle_memo_action(resp, agent_name)
+
+    # Assemblage final
     if len(responses) == 1:
         return responses[0]
     else:
-        # Assembler les résultats avec un résumé final par NovaBot
         combined = "\n\n".join([f"**{agents_to_call[i]}** : {r}" for i, r in enumerate(responses)])
-        # Demander à NovaBot de faire un résumé propre
         final_prompt = f"Voici les résultats de différents agents pour la tâche '{user_text}' :\n{combined}\nRédige une réponse finale cohérente."
-        return simple_groq_call([
+        final_resp = simple_groq_call([
             {"role": "system", "content": AGENTS["NovaBot"]["prompt"]},
             {"role": "user", "content": final_prompt}
         ])
+        return verify_output("Orchestrateur", final_resp)
 
 def handle_memo_action(response_text, agent_name):
-    """Extrait les mises à jour mémoire [MEMO:fichier] et les applique."""
+    """Extrait les mises à jour mémoire [MEMO:...] et les applique."""
     lines = response_text.split("\n")
     clean_lines = []
     for line in lines:
@@ -265,8 +321,6 @@ def handle_memo_action(response_text, agent_name):
             try:
                 after_bracket = line[len("[MEMO:"):]
                 key, value = after_bracket.split("]", 1)
-                key = key.strip()
-                # Ici on ignore le fichier, on met à jour la mémoire de l'agent directement
                 if agent_name in MEMORY:
                     MEMORY[agent_name] += value.strip() + "\n"
                     save_memory(agent_name)
@@ -289,16 +343,15 @@ def process_client_message(user_text, chat_id):
         {"role": "user", "content": user_text}
     ]
     resp = simple_groq_call(messages)
-    # Sauvegarder la réponse dans la mémoire de Larry si nécessaire
     resp = handle_memo_action(resp, "Larry")
     return resp
 
-# ================= HANDLER TELEGRAM =================
+# ================= COMMANDES TELEGRAM =================
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     if is_authorized(message):
-        bot.reply_to(message, """👑 Mode Administrateur (agents disponibles : NovaBot, Market, Créa, Coco)
-Parlez-moi de votre besoin, je choisirai le bon agent automatiquement.""")
+        bot.reply_to(message, """👑 Mode Administrateur (agents : NovaBot, Market, Créa, Coco)
+Décrivez votre besoin, le bon agent vous répondra automatiquement.""")
     else:
         username = message.chat.username or message.chat.first_name or "vous"
         bot.reply_to(message, f"Bonjour {username}, je suis Larry, conseiller chez NovaTech-IA. Comment puis-je vous aider ?")
@@ -309,6 +362,9 @@ def show_memory(message):
     text = "=== MÉMOIRES DES AGENTS ===\n"
     for name in AGENTS:
         text += f"\n--- {name} ---\n{MEMORY.get(name, '(vide)')}"
+    text += "\n\n=== MÉMOIRE PARTAGÉE ===\n"
+    for key, content in SHARED_MEMORY.items():
+        text += f"\n--- {key}.md ---\n{content if content else '(vide)'}"
     bot.reply_to(message, text[:4000])
 
 @bot.message_handler(commands=['save'])
@@ -333,12 +389,48 @@ def save_memory_command(message):
 @bot.message_handler(commands=['scrape'])
 @authorized_only
 def scrape_manuel(message):
-    # Utilise Market pour scraper
-    prompt = f"Utilise search_web pour trouver des annonces immobilières à Cotonou sur keur-immo.com/benin et donne-moi un résumé."
+    prompt = "Utilise search_web pour trouver des annonces immobilières récentes à Cotonou et donne un résumé avec les sources."
     response = process_admin_message(prompt)
     bot.reply_to(message, response)
 
-# Les autres commandes (/search, /pc, /dire) restent disponibles mais non modifiées ici.
+@bot.message_handler(commands=['search'])
+@authorized_only
+def search_command(message):
+    try:
+        query = message.text.split(" ", 1)[1]
+    except IndexError:
+        bot.reply_to(message, "Usage : /search <mots-clés>")
+        return
+    bot.send_chat_action(message.chat.id, 'typing')
+    results = search_web(query, 3)
+    if isinstance(results, list):
+        reponse = ""
+        for i, r in enumerate(results, 1):
+            reponse += f"{i}. {r.get('title', 'Sans titre')}\n{r.get('snippet', '')}\n{r.get('url', '')}\n\n"
+        bot.reply_to(message, reponse or "Aucun résultat trouvé.")
+    else:
+        bot.reply_to(message, "Erreur de recherche.")
+
+@bot.message_handler(commands=['pc'])
+@authorized_only
+def pc_commands(message):
+    bot.reply_to(message, "Commandes PC (à connecter) : /eteindre, /redemarrer, /ram, /screenshot")
+
+@bot.message_handler(commands=['dire'])
+@authorized_only
+def dire_command(message):
+    global pending_admin_chat_id
+    try:
+        text = message.text.split(" ", 1)[1]
+    except IndexError:
+        bot.reply_to(message, "Usage : /dire <message à envoyer au prospect>")
+        return
+    if pending_admin_chat_id is None:
+        bot.reply_to(message, "Aucun prospect en attente de réponse.")
+        return
+    bot.send_message(pending_admin_chat_id, text)
+    bot.reply_to(message, f"✅ Message envoyé au prospect {pending_admin_chat_id}.")
+    pending_admin_chat_id = None
 
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
@@ -350,7 +442,6 @@ def handle_all(message):
         return
 
     if not is_admin:
-        # Mode Larry
         conversations[chat_id].append(("user", message.text))
         if len(conversations[chat_id]) > 10:
             conversations[chat_id] = conversations[chat_id][-10:]
@@ -358,7 +449,6 @@ def handle_all(message):
         response = process_client_message(message.text, chat_id)
         if response:
             conversations[chat_id].append(("bot", response))
-            # Détection résumé Larry -> admin
             if "[RESUME]" in response:
                 admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
                 if admin_chat_id:
@@ -367,11 +457,9 @@ def handle_all(message):
                         resume = match.group(1).strip()
                         bot.send_message(admin_chat_id, f"📩 Résumé prospect :\n{resume}")
                         pending_admin_chat_id = chat_id
-            # Nettoyer le résumé de la réponse visible
             response = re.sub(r"\[RESUME\].*?\[FIN RESUME\]", "", response, flags=re.DOTALL).strip()
         bot.reply_to(message, response)
     else:
-        # Mode admin multi-agents
         bot.send_chat_action(message.chat.id, 'typing')
         response = process_admin_message(message.text)
         bot.reply_to(message, response)
