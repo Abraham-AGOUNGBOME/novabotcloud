@@ -106,9 +106,8 @@ Règles strictes :
 - Sois chaleureux mais concis. Parle comme un conseiller local, avec des références aux quartiers de Cotonou (Fidjrossè, Haie Vive, etc.) quand c'est pertinent.
 """
 
-# ================= OUTILS POUR L'AGENT =================
+# ================= OUTILS AGENT =================
 def search_web(query, max_results=5):
-    """Recherche DuckDuckGo et renvoie une liste de résultats (titre, extrait, URL)."""
     try:
         with DDGS() as ddgs:
             results = []
@@ -123,7 +122,6 @@ def search_web(query, max_results=5):
         return [{"error": f"Erreur recherche : {str(e)}"}]
 
 def fetch_page(url):
-    """Récupère le texte brut d'une page web (extrait jusqu'à 3000 caractères)."""
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(url, headers=headers, timeout=10)
@@ -135,7 +133,6 @@ def fetch_page(url):
     except Exception as e:
         return f"Erreur récupération page : {str(e)}"
 
-# Définition des fonctions pour le function calling Groq
 TOOLS = [
     {
         "type": "function",
@@ -169,7 +166,6 @@ TOOLS = [
 ]
 
 def execute_function_call(function_name, arguments):
-    """Exécute la fonction appelée par Groq."""
     if function_name == "search_web":
         query = arguments.get("query", "")
         max_results = arguments.get("max_results", 5)
@@ -204,10 +200,9 @@ def reset_conversation(chat_id):
     if pending_admin_chat_id == chat_id:
         pending_admin_chat_id = None
 
-# ================= GROQ AVEC FUNCTION CALLING =================
-def call_groq_with_tools(messages, tools=None, max_iterations=5):
-    """Appelle Groq et gère les appels de fonction éventuels (boucle d'agent)."""
-    for _ in range(max_iterations):
+# ================= GROQ AVEC GESTION 429 =================
+def call_groq_with_tools(messages, tools=None, max_iterations=3):
+    for i in range(max_iterations):
         headers = {
             "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json"
@@ -224,48 +219,48 @@ def call_groq_with_tools(messages, tools=None, max_iterations=5):
 
         try:
             resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
+            if resp.status_code == 429:
+                time.sleep(5)  # attendre avant de réessayer
+                continue
             resp.raise_for_status()
             data = resp.json()
             message = data["choices"][0]["message"]
 
-            # Si le modèle appelle une fonction
             if "tool_calls" in message:
-                messages.append(message)  # ajouter la réponse de l'assistant
+                messages.append(message)
                 for tool_call in message["tool_calls"]:
                     function_name = tool_call["function"]["name"]
                     arguments = json.loads(tool_call["function"]["arguments"])
                     result = execute_function_call(function_name, arguments)
-                    # Ajouter le résultat de la fonction sous forme de message "tool"
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
                         "name": function_name,
                         "content": json.dumps(result, ensure_ascii=False)
                     })
-                # Continuer la boucle pour laisser le modèle intégrer les résultats
+                time.sleep(2)  # pause entre les étapes pour respecter le quota
                 continue
             else:
-                # Réponse normale, on la retourne
                 return message["content"]
         except Exception as e:
+            if "429" in str(e):
+                time.sleep(5)
+                continue
             return f"Erreur API Groq : {str(e)}"
-    return "Désolé, je n'ai pas pu accomplir la tâche dans le nombre d'étapes autorisé."
+    return "Désolé, je n'ai pas pu accomplir la tâche (limite de tentatives atteinte)."
 
-# ================= TRAITEMENT DES MESSAGES =================
 def process_message(user_text, chat_id, is_admin=False):
     if is_admin:
         mem_context = ""
         for key, content in MEMORY.items():
             if content.strip():
                 mem_context += f"=== {key}.md ===\n{content}\n\n"
-        system_prompt = ADMIN_PROMPT
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": ADMIN_PROMPT},
         ]
         if mem_context:
             messages.append({"role": "system", "content": f"Mémoire actuelle :\n{mem_context}"})
         messages.append({"role": "user", "content": user_text})
-        # Utiliser le function calling avec outils
         return call_groq_with_tools(messages, TOOLS)
     else:
         if pending_admin_chat_id == chat_id:
@@ -278,18 +273,18 @@ def process_message(user_text, chat_id, is_admin=False):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text}
         ]
-        # Appel simple sans outils pour le mode client
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "llama-3.1-8b-instant",
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 1000
-        }
+        # Appel simple sans outils (évite la boucle pour les clients)
         try:
+            headers = {
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "llama-3.1-8b-instant",
+                "messages": messages,
+                "temperature": 0.7,
+                "max_tokens": 1000
+            }
             resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
@@ -347,9 +342,8 @@ def detecter_nouveaute(resume_text):
         return " ; ".join(nouveautes[:2])
     return None
 
-# ================= SCRAPING IA (remplace l'ancien placeholder) =================
+# ================= SCRAPING IA =================
 def scrape_annonces():
-    """Utilise l'IA pour extraire des annonces de Keur-immo."""
     url = "https://keur-immo.com/benin"
     try:
         page_text = fetch_page(url)
