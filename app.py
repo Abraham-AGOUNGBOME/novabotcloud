@@ -86,9 +86,14 @@ def save_memory(key):
 # ================= PROMPTS SYSTÈME =================
 ADMIN_PROMPT = """Tu es NovaBot, l'assistant administratif de Larry (l'agent commercial de NovaTech-IA, Cotonou, Bénin).
 Tu aides l'administrateur à gérer le business : analyse de marché, rédaction de messages de prospection, suivi des cibles.
-Tu as accès à la mémoire (cibles, tarifs, apprentissages) et tu peux suggérer des actions.
-Tu peux utiliser les outils de recherche web pour obtenir des informations récentes ou externes.
-Quand c'est pertinent, termine par [MEMO:fichier] contenu pour sauvegarder automatiquement.
+Tu as accès à la mémoire (cibles, tarifs, apprentissages).
+
+RÈGLES STRICTES :
+1. Si l'administrateur te demande une information récente ou une tendance actuelle (ex: "tendances", "dernières news", "contacts", "donne-moi des sources"), tu DOIS utiliser l'outil search_web pour chercher sur le web. Ne réponds jamais sans avoir d'abord effectué une recherche si la question concerne des faits récents ou des données externes.
+2. Si les résultats de recherche sont insuffisants, tu peux utiliser fetch_page pour lire le contenu des pages trouvées.
+3. Compile toujours les résultats de manière structurée, avec les sources.
+4. Si tu as déjà la réponse dans la mémoire (cibles, tarifs, apprentissages), utilise-la d'abord.
+5. Quand c'est pertinent, termine par [MEMO:fichier] contenu pour sauvegarder automatiquement.
 Sois concis et orienté action.
 """
 
@@ -220,7 +225,7 @@ def call_groq_with_tools(messages, tools=None, max_iterations=3):
         try:
             resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
             if resp.status_code == 429:
-                time.sleep(5)  # attendre avant de réessayer
+                time.sleep(5)
                 continue
             resp.raise_for_status()
             data = resp.json()
@@ -238,7 +243,7 @@ def call_groq_with_tools(messages, tools=None, max_iterations=3):
                         "name": function_name,
                         "content": json.dumps(result, ensure_ascii=False)
                     })
-                time.sleep(2)  # pause entre les étapes pour respecter le quota
+                time.sleep(2)
                 continue
             else:
                 return message["content"]
@@ -261,7 +266,21 @@ def process_message(user_text, chat_id, is_admin=False):
         if mem_context:
             messages.append({"role": "system", "content": f"Mémoire actuelle :\n{mem_context}"})
         messages.append({"role": "user", "content": user_text})
-        return call_groq_with_tools(messages, TOOLS)
+        
+        # Premier essai avec outils
+        response = call_groq_with_tools(messages, TOOLS)
+        
+        # Si la réponse ne semble pas contenir de recherche alors que c'est nécessaire, on force
+        low_user = user_text.lower()
+        low_resp = response.lower()
+        if any(kw in low_user for kw in ["tendance", "contact", "source", "cherche", "trouve", "donne-moi", "scrape"]) \
+           and "http" not in low_resp and "source" not in low_resp:
+            # Relancer avec une instruction explicite
+            messages.append({"role": "assistant", "content": response})
+            messages.append({"role": "user", "content": "Utilise immédiatement l'outil search_web pour chercher cette information. Donne les résultats avec les URLs."})
+            response = call_groq_with_tools(messages, TOOLS)
+        
+        return response
     else:
         if pending_admin_chat_id == chat_id:
             return None
@@ -273,7 +292,6 @@ def process_message(user_text, chat_id, is_admin=False):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text}
         ]
-        # Appel simple sans outils (évite la boucle pour les clients)
         try:
             headers = {
                 "Authorization": f"Bearer {GROQ_API_KEY}",
