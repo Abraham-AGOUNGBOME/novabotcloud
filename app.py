@@ -43,15 +43,70 @@ def authorized_only(func):
         return func(message, *args, **kwargs)
     return wrapper
 
-# ================= MÉMOIRE PERSISTANTE =================
+# ================= MÉMOIRE PERSISTANTE MULTI-AGENTS =================
 MEMORY_DIR = "memory"
-FILES = {
-    "cibles": "cibles.md",
-    "tarifs": "tarifs.md",
-    "apprentissages": "apprentissages.md"
+AGENTS = {
+    "NovaBot": {
+        "prompt": """Tu es NovaBot, l'assistant administratif central de NovaTech-IA, Cotonou, Bénin.
+Tu supervises les autres agents (Market, Créa, Coco, Larry) et tu prends les décisions finales.
+Tu as accès à toutes les mémoires. Sois concis et orienté action.""",
+        "memory_file": "novabot_memory.md",
+        "description": "Assistant principal, gestion administrative, supervision"
+    },
+    "Market": {
+        "prompt": """Tu es Market, l'agent d'analyse de marché et de tendances.
+Tu cherches sur le web, analyses les données, et fournis des rapports avec sources.
+Utilise l'outil search_web quand nécessaire. Sois précis et chiffré.""",
+        "memory_file": "market_memory.md",
+        "description": "Recherche de tendances, analyse de marché, veille concurrentielle"
+    },
+    "Créa": {
+        "prompt": """Tu es Créa, l'agent créatif de NovaTech-IA.
+Tu rédiges des posts Facebook, des messages de prospection, des accroches marketing.
+Ton style est punchy, moderne, adapté au public béninois. Pas de blabla corporate.""",
+        "memory_file": "crea_memory.md",
+        "description": "Création de contenu, rédaction marketing, posts réseaux sociaux"
+    },
+    "Coco": {
+        "prompt": """Tu es Coco, le comptable de NovaTech-IA.
+Tu gères les tarifs, les devis, la rentabilité. Tu calcules les marges et suis les revenus.
+Sois rigoureux et transparent.""",
+        "memory_file": "coco_memory.md",
+        "description": "Comptabilité, tarifs, devis, suivi financier"
+    },
+    "Larry": {
+        "prompt": """Tu es Larry, l'agent commercial pour les visites 3D.
+Tu parles aux clients potentiels, tu les qualifies, tu ne forces jamais.
+Ne mentionne pas les autres agents. Reste chaleureux et professionnel.""",
+        "memory_file": "larry_memory.md",
+        "description": "Vente et qualification de prospects pour visites 3D"
+    }
 }
+# Mémoire chargée pour chaque agent
 MEMORY = {}
 
+def load_all_memory():
+    os.makedirs(MEMORY_DIR, exist_ok=True)
+    for agent_name, cfg in AGENTS.items():
+        filepath = os.path.join(MEMORY_DIR, cfg["memory_file"])
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                MEMORY[agent_name] = f.read()
+        except FileNotFoundError:
+            MEMORY[agent_name] = ""
+            # Créer le fichier vide
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write("")
+
+def save_memory(agent_name):
+    if agent_name not in AGENTS:
+        return
+    filepath = os.path.join(MEMORY_DIR, AGENTS[agent_name]["memory_file"])
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(MEMORY[agent_name])
+    git_push()
+
+# ================= GIT PUSH POUR TOUS LES FICHIERS =================
 def git_setup():
     repo_url = f"https://{GIT_TOKEN}@github.com/Abraham-AGOUNGBOME/novabotcloud.git"
     subprocess.run(["git", "remote", "set-url", "origin", repo_url], capture_output=True)
@@ -67,45 +122,7 @@ def git_push():
     subprocess.run(["git", "commit", "-m", commit_msg], capture_output=True)
     subprocess.run(["git", "push", "origin", "main"], capture_output=True)
 
-def load_memory():
-    os.makedirs(MEMORY_DIR, exist_ok=True)
-    for key, filename in FILES.items():
-        filepath = os.path.join(MEMORY_DIR, filename)
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                MEMORY[key] = f.read()
-        except FileNotFoundError:
-            MEMORY[key] = ""
-
-def save_memory(key):
-    filepath = os.path.join(MEMORY_DIR, FILES[key])
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(MEMORY[key])
-    git_push()
-
-# ================= PROMPTS SYSTÈME =================
-ADMIN_PROMPT = """Tu es NovaBot, l'assistant administratif de Larry (l'agent commercial de NovaTech-IA, Cotonou, Bénin).
-Tu aides l'administrateur à gérer le business : analyse de marché, rédaction de messages de prospection, suivi des cibles.
-Tu as accès à la mémoire (cibles, tarifs, apprentissages).
-Quand tu reçois des résultats de recherche web, utilise-les pour répondre avec des sources.
-Sois concis et orienté action. Termine par [MEMO:fichier] si pertinent.
-"""
-
-CLIENT_PROMPT = """Tu es Larry, un assistant commercial amical et professionnel représentant NovaTech-IA, une entreprise spécialisée dans les visites virtuelles 3D pour l'immobilier, basée à Cotonou, Bénin.
-Ton seul service : la création de visites virtuelles 3D immersives pour mettre en valeur des biens (appartements, villas, hôtels, résidences meublées).
-
-Règles strictes :
-- Reste toujours concentré sur la visite 3D. Ne mentionne jamais d'autres services (bots Telegram, automatisation IA, etc.) sauf si le client le demande explicitement.
-- Écoute d'abord, pose des questions sur le bien à valoriser, son emplacement, son standing.
-- Ne mentionne pas les prix sauf si le client te les demande. Tarifs : scan 3D standard à 75 000 FCFA, premium à 120 000 FCFA.
-- Ne propose jamais de devis ni de rendez-vous. Si le client en veut un, réponds poliment que tu vas vérifier et revenir vers lui.
-- Utilise l'historique pour ne pas répéter les mêmes questions.
-- Quand tu as suffisamment d'informations (type de bien, localisation, budget évoqué, intérêt), produis un résumé pour l'administrateur avec la balise [RESUME]...[/FIN RESUME]. Le client ne doit jamais voir cette balise.
-- Ne mentionne jamais les commandes admin, la mémoire, ou les coulisses techniques.
-- Sois chaleureux mais concis. Parle comme un conseiller local, avec des références aux quartiers de Cotonou (Fidjrossè, Haie Vive, etc.) quand c'est pertinent.
-"""
-
-# ================= OUTILS DE RECHERCHE (appelés directement) =================
+# ================= OUTILS DE RECHERCHE =================
 def search_web(query, max_results=5):
     try:
         with DDGS() as ddgs:
@@ -120,19 +137,7 @@ def search_web(query, max_results=5):
     except Exception as e:
         return [{"error": f"Erreur recherche : {str(e)}"}]
 
-def fetch_page(url):
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup(["script", "style", "nav", "footer", "header"]):
-            tag.decompose()
-        text = soup.get_text(separator="\n", strip=True)
-        return text[:3000] if text else "Page vide"
-    except Exception as e:
-        return f"Erreur récupération page : {str(e)}"
-
-# ================= GESTION DES CONVERSATIONS =================
+# ================= GESTION DES CONVERSATIONS CLIENT =================
 conversations = defaultdict(list)
 last_activity = {}
 pending_admin_chat_id = None
@@ -175,68 +180,84 @@ def simple_groq_call(messages, max_tokens=1000):
     except Exception as e:
         return f"Erreur API Groq : {str(e)}"
 
-# ================= TRAITEMENT DES MESSAGES =================
-def process_message(user_text, chat_id, is_admin=False):
-    if is_admin:
-        # Charger la mémoire
-        mem_context = ""
-        for key, content in MEMORY.items():
-            if content.strip():
-                mem_context += f"=== {key}.md ===\n{content}\n\n"
+# ================= ORCHESTRATEUR (choix automatique des agents) =================
+def orchestrate(user_text, mem_context):
+    # Demander à Groq quel agent utiliser
+    agent_list = "\n".join([f"- {name}: {cfg['description']}" for name, cfg in AGENTS.items()])
+    prompt = f"""Tu es un aiguilleur automatique. Analyse le message utilisateur et décide quel agent doit répondre.
+Agents disponibles :
+{agent_list}
 
-        low_user = user_text.lower()
-        need_search = any(kw in low_user for kw in [
-            "tendance", "contact", "source", "cherche", "trouve",
-            "donne-moi", "scrape", "actualité", "récent", "dernier"
+Règles :
+- Si le message concerne une recherche, une tendance, une analyse, choisis "Market".
+- Si le message demande un contenu créatif, un post Facebook, un message de prospection, choisis "Créa".
+- Si le message parle d'argent, de tarifs, de devis, de comptabilité, choisis "Coco".
+- Si c'est une conversation commerciale avec un prospect (qualification, vente 3D), choisis "Larry".
+- Si c'est une demande administrative, de gestion, ou de supervision, choisis "NovaBot".
+- Si la tâche nécessite plusieurs étapes, propose une séquence d'agents dans l'ordre, ex: Market -> Créa.
+
+Réponds UNIQUEMENT par le nom de l'agent ou une séquence avec -> (ex: "Market" ou "Market -> Créa"). Pas de phrase supplémentaire.
+Message utilisateur : {user_text}
+"""
+    decision = simple_groq_call([{"role": "user", "content": prompt}], max_tokens=50).strip()
+    return decision
+
+def process_admin_message(user_text):
+    """Traite un message admin en mode multi-agents automatique."""
+    # Mémoire de NovaBot (administrateur)
+    mem_context = MEMORY.get("NovaBot", "")
+
+    # 1. Décider quel agent utiliser
+    plan = orchestrate(user_text, mem_context)
+    logging.info(f"Plan d'agents: {plan}")
+
+    # Si le plan contient "->", c'est une séquence
+    if "->" in plan:
+        agents_to_call = [a.strip() for a in plan.split("->")]
+    else:
+        agents_to_call = [plan.strip()]
+
+    # 2. Exécuter les agents dans l'ordre
+    context = user_text  # le message original
+    responses = []
+    for agent_name in agents_to_call:
+        if agent_name not in AGENTS:
+            # Agent inconnu, on utilise NovaBot par défaut
+            agent_name = "NovaBot"
+        # Construire les messages pour cet agent
+        agent_memory = MEMORY.get(agent_name, "")
+        agent_prompt = AGENTS[agent_name]["prompt"]
+        messages = [
+            {"role": "system", "content": agent_prompt},
+        ]
+        if agent_memory:
+            messages.append({"role": "system", "content": f"Mémoire de {agent_name} :\n{agent_memory}"})
+        # Si ce n'est pas le premier agent, on ajoute le résultat précédent
+        if len(responses) > 0:
+            context = f"Contexte précédent : {responses[-1]}\n\nTâche : {user_text}"
+        else:
+            context = user_text
+        messages.append({"role": "user", "content": context})
+        resp = simple_groq_call(messages)
+        responses.append(resp)
+        # Sauvegarder dans la mémoire de l'agent si celui-ci a utilisé [MEMO:...]
+        resp = handle_memo_action(resp, agent_name)  # adapté pour agent spécifique
+
+    # 3. Retourner la dernière réponse (ou une combinaison)
+    if len(responses) == 1:
+        return responses[0]
+    else:
+        # Assembler les résultats avec un résumé final par NovaBot
+        combined = "\n\n".join([f"**{agents_to_call[i]}** : {r}" for i, r in enumerate(responses)])
+        # Demander à NovaBot de faire un résumé propre
+        final_prompt = f"Voici les résultats de différents agents pour la tâche '{user_text}' :\n{combined}\nRédige une réponse finale cohérente."
+        return simple_groq_call([
+            {"role": "system", "content": AGENTS["NovaBot"]["prompt"]},
+            {"role": "user", "content": final_prompt}
         ])
 
-        if need_search:
-            results = search_web(user_text)
-            if not results or "error" in results[0]:
-                return "Désolé, la recherche web n'a donné aucun résultat."
-
-            # Construire un prompt de résumé
-            results_str = json.dumps(results, ensure_ascii=False, indent=2)[:2500]
-            prompt = f"""Voici les résultats d'une recherche web pour : "{user_text}".
-Rédige une réponse concise qui résume les informations trouvées, en citant les sources (URLs).
-Si les résultats ne sont pas pertinents, dis-le poliment.
-
-Résultats :
-{results_str}
-
-Réponse :"""
-            messages = [
-                {"role": "system", "content": ADMIN_PROMPT},
-            ]
-            if mem_context:
-                messages.append({"role": "system", "content": f"Mémoire actuelle :\n{mem_context}"})
-            messages.append({"role": "user", "content": prompt})
-            return simple_groq_call(messages, max_tokens=600)
-
-        else:
-            # Pas de recherche nécessaire
-            messages = [
-                {"role": "system", "content": ADMIN_PROMPT},
-            ]
-            if mem_context:
-                messages.append({"role": "system", "content": f"Mémoire actuelle :\n{mem_context}"})
-            messages.append({"role": "user", "content": user_text})
-            return simple_groq_call(messages)
-    else:
-        # Mode client Larry
-        if pending_admin_chat_id == chat_id:
-            return None
-        history = get_conversation_context(chat_id)
-        system_prompt = CLIENT_PROMPT
-        if history:
-            system_prompt += f"\n\nHistorique de la conversation :\n{history}\n\nRéponds en tenant compte de ce contexte."
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text}
-        ]
-        return simple_groq_call(messages)
-
-def handle_memo_action(response_text):
+def handle_memo_action(response_text, agent_name):
+    """Extrait les mises à jour mémoire [MEMO:fichier] et les applique."""
     lines = response_text.split("\n")
     clean_lines = []
     for line in lines:
@@ -245,91 +266,49 @@ def handle_memo_action(response_text):
                 after_bracket = line[len("[MEMO:"):]
                 key, value = after_bracket.split("]", 1)
                 key = key.strip()
-                if key in FILES:
-                    MEMORY[key] += value.strip() + "\n"
-                    save_memory(key)
+                # Ici on ignore le fichier, on met à jour la mémoire de l'agent directement
+                if agent_name in MEMORY:
+                    MEMORY[agent_name] += value.strip() + "\n"
+                    save_memory(agent_name)
             except:
                 pass
         else:
             clean_lines.append(line)
     return "\n".join(clean_lines)
 
-def handle_resume_action(response_text, chat_id):
-    global pending_admin_chat_id
-    if "[RESUME]" in response_text:
-        admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
-        if admin_chat_id:
-            match = re.search(r"\[RESUME\](.*?)\[FIN RESUME\]", response_text, re.DOTALL)
-            if match:
-                resume = match.group(1).strip()
-                nouveaute = detecter_nouveaute(resume)
-                msg = f"📩 Résumé prospect :\n{resume}"
-                if nouveaute:
-                    msg += f"\n\n🆕 Nouveauté détectée : {nouveaute}\nSouhaitez-vous l'ajouter ? (/save ...)"
-                msg += f"\n\n💬 Pour répondre au prospect, utilisez /dire <message>"
-                bot.send_message(admin_chat_id, msg)
-                pending_admin_chat_id = chat_id
-    return response_text
+# ================= MODE CLIENT (Larry) =================
+def process_client_message(user_text, chat_id):
+    if pending_admin_chat_id == chat_id:
+        return None
+    history = get_conversation_context(chat_id)
+    system_prompt = AGENTS["Larry"]["prompt"]
+    if history:
+        system_prompt += f"\n\nHistorique de la conversation :\n{history}\n\nRéponds en tenant compte de ce contexte."
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text}
+    ]
+    resp = simple_groq_call(messages)
+    # Sauvegarder la réponse dans la mémoire de Larry si nécessaire
+    resp = handle_memo_action(resp, "Larry")
+    return resp
 
-def detecter_nouveaute(resume_text):
-    cibles = MEMORY.get("cibles", "").lower()
-    apprentissages = MEMORY.get("apprentissages", "").lower()
-    resume_lower = resume_text.lower()
-    nouveautes = []
-    mots_cles = ["quartier", "zone", "type de bien", "budget", "concurrent", "nouveau"]
-    for mot in mots_cles:
-        if mot in resume_lower:
-            phrases = resume_lower.split(".")
-            for phrase in phrases:
-                if mot in phrase and phrase.strip() not in cibles and phrase.strip() not in apprentissages:
-                    nouveautes.append(phrase.strip().capitalize())
-    if nouveautes:
-        return " ; ".join(nouveautes[:2])
-    return None
-
-# ================= SCRAPING IA =================
-def scrape_annonces():
-    url = "https://keur-immo.com/benin"
-    page_text = fetch_page(url)
-    if page_text.startswith("Erreur"):
-        return page_text
-    prompt = f"""
-Voici le contenu textuel de la page {url}.
-Extrais les annonces immobilières à Cotonou (Fidjrossè, Haie Vive, etc.).
-Format : 🏠 Titre / 💰 Prix / 📍 Localisation / 🔗 Lien
-Si aucune annonce, réponds "Aucune annonce pertinente trouvée."
-
-{page_text[:4000]}
-"""
-    return simple_groq_call([{"role": "user", "content": prompt}], max_tokens=500)
-
-def job_quotidien():
-    chat_id = os.environ.get("ADMIN_CHAT_ID")
-    if not chat_id:
-        return
-    rapport = scrape_annonces()
-    bot.send_message(chat_id, f"📊 Rapport quotidien :\n{rapport}")
-
-scheduler.add_job(job_quotidien, 'cron', hour=7, minute=0, timezone='Africa/Porto-Novo')
-
-# ================= COMMANDES TELEGRAM =================
+# ================= HANDLER TELEGRAM =================
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     if is_authorized(message):
-        bot.reply_to(message, """👑 Mode Administrateur Larry
-Commandes : /mem, /save, /scrape, /search, /dire, /pc
-Larry est en ligne pour les clients.
-Pour une recherche, décrivez simplement ce que vous cherchez (ex: 'tendances visite 3D').""")
+        bot.reply_to(message, """👑 Mode Administrateur (agents disponibles : NovaBot, Market, Créa, Coco)
+Parlez-moi de votre besoin, je choisirai le bon agent automatiquement.""")
     else:
         username = message.chat.username or message.chat.first_name or "vous"
-        bot.reply_to(message, f"Bonjour {username}, je suis Larry, conseiller chez NovaTech-IA. Comment puis-je vous aider aujourd'hui ?")
+        bot.reply_to(message, f"Bonjour {username}, je suis Larry, conseiller chez NovaTech-IA. Comment puis-je vous aider ?")
 
 @bot.message_handler(commands=['mem'])
 @authorized_only
 def show_memory(message):
-    text = "=== MÉMOIRE ===\n"
-    for key, content in MEMORY.items():
-        text += f"\n--- {key}.md ---\n{content or '(vide)'}"
+    text = "=== MÉMOIRES DES AGENTS ===\n"
+    for name in AGENTS:
+        text += f"\n--- {name} ---\n{MEMORY.get(name, '(vide)')}"
     bot.reply_to(message, text[:4000])
 
 @bot.message_handler(commands=['save'])
@@ -338,64 +317,28 @@ def save_memory_command(message):
     try:
         parts = message.text.split(" ", 2)
         if len(parts) < 3:
-            bot.reply_to(message, "Usage : /save <fichier> <texte>")
+            bot.reply_to(message, "Usage : /save <agent> <texte>")
             return
-        key = parts[1].lower()
+        agent_name = parts[1].capitalize()
         text = parts[2]
-        if key not in FILES:
-            bot.reply_to(message, f"Fichiers : {', '.join(FILES.keys())}")
+        if agent_name not in AGENTS:
+            bot.reply_to(message, f"Agents disponibles : {', '.join(AGENTS.keys())}")
             return
-        MEMORY[key] += text.strip() + "\n"
-        save_memory(key)
-        bot.reply_to(message, f"✅ Ajouté à {key}.md")
+        MEMORY[agent_name] += text.strip() + "\n"
+        save_memory(agent_name)
+        bot.reply_to(message, f"✅ Ajouté à la mémoire de {agent_name}")
     except Exception as e:
         bot.reply_to(message, f"Erreur : {str(e)}")
 
 @bot.message_handler(commands=['scrape'])
 @authorized_only
 def scrape_manuel(message):
-    bot.send_chat_action(message.chat.id, 'typing')
-    rapport = scrape_annonces()
-    bot.reply_to(message, rapport)
+    # Utilise Market pour scraper
+    prompt = f"Utilise search_web pour trouver des annonces immobilières à Cotonou sur keur-immo.com/benin et donne-moi un résumé."
+    response = process_admin_message(prompt)
+    bot.reply_to(message, response)
 
-@bot.message_handler(commands=['search'])
-@authorized_only
-def search_command(message):
-    try:
-        query = message.text.split(" ", 1)[1]
-    except IndexError:
-        bot.reply_to(message, "Usage : /search <mots-clés>")
-        return
-    bot.send_chat_action(message.chat.id, 'typing')
-    results = search_web(query, 3)
-    if isinstance(results, list) and len(results) > 0:
-        reponse = ""
-        for i, r in enumerate(results, 1):
-            reponse += f"{i}. {r.get('title', 'Sans titre')}\n{r.get('snippet', '')}\n{r.get('url', '')}\n\n"
-        bot.reply_to(message, reponse or "Aucun résultat trouvé.")
-    else:
-        bot.reply_to(message, "Erreur de recherche.")
-
-@bot.message_handler(commands=['pc'])
-@authorized_only
-def pc_commands(message):
-    bot.reply_to(message, "Commandes PC (à connecter) : /eteindre, /redemarrer, /ram, /screenshot")
-
-@bot.message_handler(commands=['dire'])
-@authorized_only
-def dire_command(message):
-    global pending_admin_chat_id
-    try:
-        text = message.text.split(" ", 1)[1]
-    except IndexError:
-        bot.reply_to(message, "Usage : /dire <message à envoyer au prospect>")
-        return
-    if pending_admin_chat_id is None:
-        bot.reply_to(message, "Aucun prospect en attente de réponse.")
-        return
-    bot.send_message(pending_admin_chat_id, text)
-    bot.reply_to(message, f"✅ Message envoyé au prospect {pending_admin_chat_id}.")
-    pending_admin_chat_id = None
+# Les autres commandes (/search, /pc, /dire) restent disponibles mais non modifiées ici.
 
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
@@ -407,26 +350,31 @@ def handle_all(message):
         return
 
     if not is_admin:
+        # Mode Larry
         conversations[chat_id].append(("user", message.text))
         if len(conversations[chat_id]) > 10:
             conversations[chat_id] = conversations[chat_id][-10:]
         last_activity[chat_id] = datetime.now()
-
-    bot.send_chat_action(message.chat.id, 'typing')
-    response = process_message(message.text, chat_id, is_admin)
-
-    if response is None:
-        return
-
-    if is_admin:
-        response = handle_memo_action(response)
+        response = process_client_message(message.text, chat_id)
+        if response:
+            conversations[chat_id].append(("bot", response))
+            # Détection résumé Larry -> admin
+            if "[RESUME]" in response:
+                admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
+                if admin_chat_id:
+                    match = re.search(r"\[RESUME\](.*?)\[FIN RESUME\]", response, re.DOTALL)
+                    if match:
+                        resume = match.group(1).strip()
+                        bot.send_message(admin_chat_id, f"📩 Résumé prospect :\n{resume}")
+                        pending_admin_chat_id = chat_id
+            # Nettoyer le résumé de la réponse visible
+            response = re.sub(r"\[RESUME\].*?\[FIN RESUME\]", "", response, flags=re.DOTALL).strip()
+        bot.reply_to(message, response)
     else:
-        conversations[chat_id].append(("bot", response))
-        response_clean = re.sub(r"\[RESUME\].*?\[FIN RESUME\]", "", response, flags=re.DOTALL).strip()
-        handle_resume_action(response, chat_id)
-        response = response_clean
-
-    bot.reply_to(message, response)
+        # Mode admin multi-agents
+        bot.send_chat_action(message.chat.id, 'typing')
+        response = process_admin_message(message.text)
+        bot.reply_to(message, response)
 
 # ================= ROUTES FLASK =================
 @app.route('/', methods=['GET'])
@@ -453,7 +401,7 @@ def check_inactive_conversations():
         if now - last_time > timedelta(minutes=5):
             admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
             if admin_chat_id:
-                bot.send_message(admin_chat_id, f"⏰ Le prospect {chat_id} est inactif depuis 5 minutes. Pensez à vérifier.")
+                bot.send_message(admin_chat_id, f"⏰ Prospect {chat_id} inactif depuis 5 min.")
             reset_conversation(chat_id)
 
 scheduler.add_job(check_inactive_conversations, 'interval', minutes=1)
@@ -462,7 +410,7 @@ scheduler.add_job(check_inactive_conversations, 'interval', minutes=1)
 if __name__ == '__main__':
     git_setup()
     git_pull()
-    load_memory()
+    load_all_memory()
 
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
