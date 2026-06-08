@@ -51,7 +51,8 @@ AGENTS = {
         "prompt": """Tu es NovaBot, l'assistant administratif central de NovaTech-IA, Cotonou, Bénin.
 Tu supervises les autres agents (Market, Créa, Coco, Larry) et tu prends les décisions finales.
 Tu as accès à toutes les mémoires. Sois concis et orienté action.
-Quand tu reçois les résultats d'autres agents, vérifie leur cohérence avant de répondre.""",
+Quand tu reçois les résultats d'autres agents, vérifie leur cohérence avant de répondre.
+Tu dois toujours utiliser les tarifs officiels fournis dans le contexte partagé, sans les modifier.""",
         "memory_file": "novabot_memory.md",
         "description": "Assistant principal, gestion administrative, supervision"
     },
@@ -59,25 +60,58 @@ Quand tu reçois les résultats d'autres agents, vérifie leur cohérence avant 
         "prompt": """Tu es Market, l'agent d'analyse de marché et de tendances.
 Tu cherches sur le web, analyses les données, et fournis des rapports avec sources.
 Utilise l'outil search_web quand nécessaire. Sois précis et chiffré.
-Respecte scrupuleusement le contexte de NovaTech-IA : localisation Cotonou, Bénin, secteur des visites 3D immobilières.""",
+Respecte scrupuleusement le contexte de NovaTech-IA : localisation Cotonou, Bénin, secteur des visites 3D immobilières.
+Ne donne jamais de tarif, sauf si tu cites exactement le bloc officiel fourni dans le contexte partagé.""",
         "memory_file": "market_memory.md",
         "description": "Recherche de tendances, analyse de marché, veille concurrentielle"
     },
     "Créa": {
-        "prompt": """Tu es Créa, l'agent créatif de NovaTech-IA.
-Tu rédiges des posts Facebook, des messages de prospection, des accroches marketing.
-Ton style est punchy, moderne, adapté au public béninois. Pas de blabla corporate.
-Utilise toujours les tarifs officiels (scan standard 75 000 FCFA, premium 120 000 FCFA) et mentionne uniquement le Bénin.
-Ne parle jamais d'un autre pays que le Bénin.""",
+        "prompt": """Tu es Créa, l'agent créatif de NovaTech-IA, Cotonou, Bénin.
+Tu rédiges des posts Facebook, messages WhatsApp, accroches marketing.
+
+RÈGLES ABSOLUES :
+- **Les seuls tarifs autorisés sont ceux du bloc officiel ci-dessous.** Tu dois les reproduire EXACTEMENT, sans ajout ni modification.
+- **Tu n'as pas le droit de créer un nouveau tarif**, une promotion, un abonnement, ou un forfait.
+- Si on te demande un devis ou un prix, réponds EXACTEMENT :
+   "Voici nos tarifs officiels :
+   - Scan 3D standard : 75 000 FCFA
+   - Scan 3D premium : 120 000 FCFA
+   - Hébergement mensuel : 5 000 FCFA/mois"
+- Tu ne mentionnes JAMAIS un autre pays que le Bénin.
+- Tu n'inventes jamais de statistiques ou de chiffres.
+- Si tu ne disposes pas d'une information, réponds "Je ne dispose pas de cette information" plutôt que d'inventer.
+
+EXEMPLE INTERDIT (ne fais jamais cela) :
+❌ "Abonnement mensuel à 150 000 FCFA" → INVENTÉ, INTERDIT.
+❌ "Tarif spécial de lancement" → INVENTÉ, INTERDIT.
+
+EXEMPLE CORRECT :
+✅ "Notre visite 3D premium coûte 120 000 FCFA."
+
+Reste punchy, local, mais toujours factuel.
+""",
         "memory_file": "crea_memory.md",
         "description": "Création de contenu, rédaction marketing, posts réseaux sociaux"
     },
     "Coco": {
         "prompt": """Tu es Coco, le comptable de NovaTech-IA.
-Tu gères les tarifs, les devis, la rentabilité. Tu calcules les marges et suis les revenus.
-Sois rigoureux et transparent. Tous les montants sont en FCFA.
-Coûts à connaître : scan 3D standard (prix de vente 75 000 FCFA), premium (120 000 FCFA), hébergement mensuel (5 000 FCFA/mois).
-Le coût de revient approximatif est de 25 000 FCFA pour un scan standard (temps, déplacement, logiciel).""",
+Tu fournis des informations financières exactes, basées UNIQUEMENT sur les données de l'entreprise.
+
+TARIFS OFFICIELS (seuls chiffres que tu peux utiliser) :
+- Prix de vente scan 3D standard : 75 000 FCFA
+- Prix de vente scan 3D premium : 120 000 FCFA
+- Hébergement mensuel : 5 000 FCFA/mois
+- Coût de revient estimé d'un scan standard : 25 000 FCFA (temps, déplacement, logiciel)
+
+INTERDICTIONS :
+- **Ne jamais inventer de nouveau tarif**, forfait, abonnement, remise.
+- **Ne jamais convertir en euros**, dollars, ou autre devise.
+- Si une information n'est pas dans la liste ci-dessus, réponds : "Je ne dispose pas de cette information financière."
+
+FORMAT OBLIGATOIRE POUR UNE DEMANDE DE PRIX :
+"Le prix de vente du scan 3D standard est de 75 000 FCFA, avec un coût de revient d'environ 25 000 FCFA."
+Ne dévie jamais de ce format.
+""",
         "memory_file": "coco_memory.md",
         "description": "Comptabilité, tarifs, devis, suivi financier"
     },
@@ -85,7 +119,10 @@ Le coût de revient approximatif est de 25 000 FCFA pour un scan standard (temps
         "prompt": """Tu es Larry, l'agent commercial pour les visites 3D.
 Tu parles aux clients potentiels, tu les qualifies, tu ne forces jamais.
 Ne mentionne pas les autres agents. Reste chaleureux et professionnel.
-Service : visites virtuelles 3D pour immobilier à Cotonou (Fidjrossè, Haie Vive, etc.).""",
+Service : visites virtuelles 3D pour immobilier à Cotonou (Fidjrossè, Haie Vive, etc.).
+Si le client demande un prix, utilise UNIQUEMENT les tarifs officiels présents dans le contexte partagé.
+Ne divague jamais sur d'autres services.
+""",
         "memory_file": "larry_memory.md",
         "description": "Vente et qualification de prospects pour visites 3D"
     }
@@ -125,7 +162,7 @@ def save_memory(agent_name):
         f.write(MEMORY[agent_name])
     git_push()
 
-# ================= GIT PUSH POUR TOUS LES FICHIERS =================
+# ================= GIT =================
 def git_setup():
     repo_url = f"https://{GIT_TOKEN}@github.com/Abraham-AGOUNGBOME/novabotcloud.git"
     subprocess.run(["git", "remote", "set-url", "origin", repo_url], capture_output=True)
@@ -156,7 +193,7 @@ def search_web(query, max_results=5):
     except Exception as e:
         return [{"error": f"Erreur recherche : {str(e)}"}]
 
-# ================= GESTION DES CONVERSATIONS CLIENT =================
+# ================= GESTION CONVERSATIONS CLIENT =================
 conversations = defaultdict(list)
 last_activity = {}
 pending_admin_chat_id = None
@@ -201,61 +238,67 @@ def simple_groq_call(messages, max_tokens=1000):
 
 # ================= HARNAIS DE VÉRIFICATION =================
 def verify_output(agent_name, output):
-    """Vérifie la cohérence de la sortie d'un agent (pas d'autre pays, bons tarifs)."""
+    """Vérifie la cohérence de la sortie (pays, tarifs inventés, etc.)."""
+    # Vérification des prix interdits
+    tarifs_autorises = ["75 000", "120 000", "5 000", "25 000"]  # en FCFA
+    # Capturer tous les montants en FCFA
+    mots_prix = re.findall(r'\d[\d\s]*\d?\s?FCFA', output)
+    for prix in mots_prix:
+        chiffre = re.sub(r'[^\d]', '', prix)
+        if chiffre not in [t.replace(' ', '') for t in tarifs_autorises]:
+            return f"❌ Prix inventé détecté ({prix}). Utilisez uniquement les tarifs officiels."
+
+    # Vérification pays
+    if "Côte d'Ivoire" in output or "Côte d’Ivoire" in output or "côte d'ivoire" in output.lower():
+        return "❌ Mention d'un autre pays que le Bénin. Correction obligatoire."
+    if "euro" in output.lower() and "FCFA" not in output:
+        return "❌ Devise incorrecte. Tous les montants doivent être en FCFA."
+
+    # Vérification générique de cohérence via Groq
     prompt = f"""Tu es un vérificateur qualité pour NovaTech-IA (Cotonou, Bénin).
 Analyse cette sortie produite par l'agent {agent_name}.
-Contexte de l'entreprise :
-- Pays : Bénin (jamais un autre pays)
-- Services : visites virtuelles 3D immobilières uniquement
-- Tarifs exacts : Scan 3D standard 75 000 FCFA, premium 120 000 FCFA, hébergement 5 000 FCFA/mois
-
-Règles :
-- Si la sortie mentionne un autre pays, une autre devise, ou des prix incorrects, réponds "PROBLÈME : <description>".
-- Si tout est correct, réponds "OK".
-
-Sortie à vérifier :
-{output[:1500]}
-"""
+Contexte : visites 3D immobilières, tarifs stricts (75k, 120k, 5k FCFA).
+Si tout est correct, réponds "OK".
+Si un problème est détecté (autre pays, prix faux, service hors sujet), réponds "PROBLÈME : <description>".
+Sortie : {output[:1500]}"""
     resp = simple_groq_call([{"role": "user", "content": prompt}], max_tokens=100)
     if "OK" in resp:
         return output
     else:
-        # Demander une correction à l'agent
-        correction_prompt = f"""Ta sortie précédente a été rejetée pour le motif suivant :
-{resp}
-Corrige-la en respectant les informations réelles de l'entreprise (Bénin, tarifs exacts, services 3D).
-Sortie rejetée :
-{output[:1000]}
-Nouvelle version corrigée :"""
+        # Force une correction
+        correction_prompt = f"""Corrige la sortie suivante selon cette remarque : {resp}
+Respecte scrupuleusement les tarifs officiels (75k, 120k, 5k FCFA) et le pays (Bénin).
+Sortie rejetée : {output[:1000]}
+Nouvelle version :"""
         corrected = simple_groq_call([{"role": "user", "content": correction_prompt}], max_tokens=1000)
         return corrected
 
 def validate_plan(plan, user_text):
-    """Demande à NovaBot si la séquence d'agents est pertinente."""
-    prompt = f"""En tant que superviseur, valide ce plan d'action pour la demande : "{user_text}"
+    """Valide que la séquence d'agents est pertinente."""
+    prompt = f"""Superviseur, valide ce plan d'action pour : "{user_text}"
 Plan proposé : {plan}
-Réponds "OK" si c'est adapté, sinon propose une meilleure séquence d'agents (séparés par ->)."""
+Réponds "OK" si adapté, sinon propose une meilleure séquence (ex: Market -> Créa)."""
     resp = simple_groq_call([{"role": "user", "content": prompt}], max_tokens=50)
     return "OK" in resp
 
 def orchestrate(user_text, shared_context):
-    """Choisit le(s) agent(s) le(s) plus adapté(s) à la demande."""
+    """Choisit le(s) agent(s) le(s) plus adapté(s)."""
     agent_list = "\n".join([f"- {name}: {cfg['description']}" for name, cfg in AGENTS.items()])
-    prompt = f"""Tu es un aiguilleur automatique. Analyse le message utilisateur et décide quel agent doit répondre.
+    prompt = f"""Aiguilleur automatique. Analyse le message utilisateur et décide quel agent doit répondre.
 Agents disponibles :
 {agent_list}
 
 Règles :
 - Recherche, tendances, analyse → Market
 - Contenu créatif, post Facebook, message prospection → Créa
-- Argent, tarifs, devis, comptabilité → Coco
+- Argent, tarifs, devis, comptabilité → Coco (PRIORITAIRE pour toute question de prix)
 - Conversation commerciale avec un prospect → Larry
 - Supervision, coordination, demande administrative → NovaBot
 - Si la tâche nécessite plusieurs étapes, donne une séquence avec -> (ex: Market -> Créa).
+- Ne jamais envoyer une question purement tarifaire à Créa.
 
-Réponds UNIQUEMENT par le nom de l'agent ou une séquence (ex: "Market" ou "Market -> Créa").
-Message utilisateur : {user_text}
-"""
+Réponds UNIQUEMENT par le nom de l'agent ou une séquence (ex: "Market" ou "Coco").
+Message utilisateur : {user_text}"""
     return simple_groq_call([{"role": "user", "content": prompt}], max_tokens=50).strip()
 
 # ================= TRAITEMENT ADMIN MULTI-AGENTS =================
@@ -265,9 +308,11 @@ def process_admin_message(user_text):
         if content.strip():
             shared_context += f"=== {key}.md ===\n{content}\n\n"
 
-    # 1. Planification
+    # Ajouter instruction spéciale pour les tarifs
+    shared_context += "\n**RAPPEL ABSOLU : Les seuls tarifs autorisés sont les suivants. Vous devez les reproduire à l'identique :**\n"
+    shared_context += "- Scan 3D standard : 75 000 FCFA\n- Scan 3D premium : 120 000 FCFA\n- Hébergement mensuel : 5 000 FCFA/mois\n"
+
     plan = orchestrate(user_text, shared_context)
-    # 2. Validation du plan
     if not validate_plan(plan, user_text):
         return "Le plan proposé n'a pas été validé par le superviseur. Veuillez reformuler votre demande."
 
@@ -279,14 +324,12 @@ def process_admin_message(user_text):
         if agent_name not in AGENTS:
             agent_name = "NovaBot"
 
-        # Prompt enrichi avec la mémoire partagée et individuelle
         agent_prompt = AGENTS[agent_name]["prompt"] + f"\n\nContexte partagé de NovaTech-IA :\n{shared_context}"
         agent_memory = MEMORY.get(agent_name, "")
         messages = [{"role": "system", "content": agent_prompt}]
         if agent_memory:
             messages.append({"role": "system", "content": f"Mémoire personnelle de {agent_name} :\n{agent_memory}"})
 
-        # Passage du contexte précédent si pipeline
         if len(responses) > 0:
             context = f"Contexte précédent : {responses[-1]}\n\nTâche : {user_text}"
         else:
@@ -294,13 +337,10 @@ def process_admin_message(user_text):
         messages.append({"role": "user", "content": context})
 
         resp = simple_groq_call(messages)
-        # Vérification de la sortie
         resp = verify_output(agent_name, resp)
         responses.append(resp)
-        # Sauvegarde mémoire automatique
         resp = handle_memo_action(resp, agent_name)
 
-    # Assemblage final
     if len(responses) == 1:
         return responses[0]
     else:
@@ -313,7 +353,6 @@ def process_admin_message(user_text):
         return verify_output("Orchestrateur", final_resp)
 
 def handle_memo_action(response_text, agent_name):
-    """Extrait les mises à jour mémoire [MEMO:...] et les applique."""
     lines = response_text.split("\n")
     clean_lines = []
     for line in lines:
