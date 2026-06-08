@@ -11,6 +11,8 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 import re
+import json
+from duckduckgo_search import DDGS
 
 # ================= CONFIG =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -85,6 +87,7 @@ def save_memory(key):
 ADMIN_PROMPT = """Tu es NovaBot, l'assistant administratif de Larry (l'agent commercial de NovaTech-IA, Cotonou, Bénin).
 Tu aides l'administrateur à gérer le business : analyse de marché, rédaction de messages de prospection, suivi des cibles.
 Tu as accès à la mémoire (cibles, tarifs, apprentissages) et tu peux suggérer des actions.
+Tu peux utiliser les outils de recherche web pour obtenir des informations récentes ou externes.
 Quand c'est pertinent, termine par [MEMO:fichier] contenu pour sauvegarder automatiquement.
 Sois concis et orienté action.
 """
@@ -103,10 +106,84 @@ Règles strictes :
 - Sois chaleureux mais concis. Parle comme un conseiller local, avec des références aux quartiers de Cotonou (Fidjrossè, Haie Vive, etc.) quand c'est pertinent.
 """
 
+# ================= OUTILS POUR L'AGENT =================
+def search_web(query, max_results=5):
+    """Recherche DuckDuckGo et renvoie une liste de résultats (titre, extrait, URL)."""
+    try:
+        with DDGS() as ddgs:
+            results = []
+            for r in ddgs.text(query, max_results=max_results):
+                results.append({
+                    "title": r["title"],
+                    "snippet": r["body"],
+                    "url": r["href"]
+                })
+            return results if results else [{"error": "Aucun résultat trouvé"}]
+    except Exception as e:
+        return [{"error": f"Erreur recherche : {str(e)}"}]
+
+def fetch_page(url):
+    """Récupère le texte brut d'une page web (extrait jusqu'à 3000 caractères)."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        return text[:3000] if text else "Page vide"
+    except Exception as e:
+        return f"Erreur récupération page : {str(e)}"
+
+# Définition des fonctions pour le function calling Groq
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Recherche sur le web via DuckDuckGo et renvoie une liste de résultats (titre, extrait, URL).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "La requête de recherche"},
+                    "max_results": {"type": "integer", "description": "Nombre maximum de résultats (défaut 5)"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_page",
+            "description": "Récupère le contenu textuel d'une page web à partir de son URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "L'URL de la page à récupérer"}
+                },
+                "required": ["url"]
+            }
+        }
+    }
+]
+
+def execute_function_call(function_name, arguments):
+    """Exécute la fonction appelée par Groq."""
+    if function_name == "search_web":
+        query = arguments.get("query", "")
+        max_results = arguments.get("max_results", 5)
+        return search_web(query, max_results)
+    elif function_name == "fetch_page":
+        url = arguments.get("url", "")
+        return fetch_page(url)
+    else:
+        return {"error": f"Fonction inconnue : {function_name}"}
+
 # ================= GESTION DES CONVERSATIONS =================
-conversations = defaultdict(list)      # historique par chat_id
-last_activity = {}                     # timestamp du dernier message
-pending_admin_chat_id = None           # ID du prospect en attente de /dire
+conversations = defaultdict(list)
+last_activity = {}
+pending_admin_chat_id = None
 
 def get_conversation_context(chat_id):
     msgs = conversations[chat_id]
@@ -127,42 +204,72 @@ def reset_conversation(chat_id):
     if pending_admin_chat_id == chat_id:
         pending_admin_chat_id = None
 
-# ================= GROQ =================
-def call_groq(messages):
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "llama-3.1-8b-instant",
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 1000
-    }
-    try:
-        resp = requests.post(GROQ_URL, headers=headers, json=data, timeout=30)
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        return f"Erreur API Groq : {str(e)}"
+# ================= GROQ AVEC FUNCTION CALLING =================
+def call_groq_with_tools(messages, tools=None, max_iterations=5):
+    """Appelle Groq et gère les appels de fonction éventuels (boucle d'agent)."""
+    for _ in range(max_iterations):
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 1000
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
 
+        try:
+            resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            message = data["choices"][0]["message"]
+
+            # Si le modèle appelle une fonction
+            if "tool_calls" in message:
+                messages.append(message)  # ajouter la réponse de l'assistant
+                for tool_call in message["tool_calls"]:
+                    function_name = tool_call["function"]["name"]
+                    arguments = json.loads(tool_call["function"]["arguments"])
+                    result = execute_function_call(function_name, arguments)
+                    # Ajouter le résultat de la fonction sous forme de message "tool"
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "name": function_name,
+                        "content": json.dumps(result, ensure_ascii=False)
+                    })
+                # Continuer la boucle pour laisser le modèle intégrer les résultats
+                continue
+            else:
+                # Réponse normale, on la retourne
+                return message["content"]
+        except Exception as e:
+            return f"Erreur API Groq : {str(e)}"
+    return "Désolé, je n'ai pas pu accomplir la tâche dans le nombre d'étapes autorisé."
+
+# ================= TRAITEMENT DES MESSAGES =================
 def process_message(user_text, chat_id, is_admin=False):
     if is_admin:
         mem_context = ""
         for key, content in MEMORY.items():
             if content.strip():
                 mem_context += f"=== {key}.md ===\n{content}\n\n"
+        system_prompt = ADMIN_PROMPT
         messages = [
-            {"role": "system", "content": ADMIN_PROMPT},
+            {"role": "system", "content": system_prompt},
         ]
         if mem_context:
             messages.append({"role": "system", "content": f"Mémoire actuelle :\n{mem_context}"})
         messages.append({"role": "user", "content": user_text})
+        # Utiliser le function calling avec outils
+        return call_groq_with_tools(messages, TOOLS)
     else:
-        # Si le client est en attente de /dire, on le prévient et on ignore
-        global pending_admin_chat_id
         if pending_admin_chat_id == chat_id:
-            return None  # On ne répond pas, l'admin doit d'abord utiliser /dire
+            return None
         history = get_conversation_context(chat_id)
         system_prompt = CLIENT_PROMPT
         if history:
@@ -171,7 +278,23 @@ def process_message(user_text, chat_id, is_admin=False):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text}
         ]
-    return call_groq(messages)
+        # Appel simple sans outils pour le mode client
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 1000
+        }
+        try:
+            resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            return f"Erreur API Groq : {str(e)}"
 
 def handle_memo_action(response_text):
     lines = response_text.split("\n")
@@ -205,7 +328,6 @@ def handle_resume_action(response_text, chat_id):
                     msg += f"\n\n🆕 Nouveauté détectée : {nouveaute}\nSouhaitez-vous l'ajouter ? (/save ...)"
                 msg += f"\n\n💬 Pour répondre au prospect, utilisez /dire <message>"
                 bot.send_message(admin_chat_id, msg)
-                # Mettre en attente (ne pas effacer l'historique)
                 pending_admin_chat_id = chat_id
     return response_text
 
@@ -225,9 +347,31 @@ def detecter_nouveaute(resume_text):
         return " ; ".join(nouveautes[:2])
     return None
 
-# ================= SCRAPING =================
+# ================= SCRAPING IA (remplace l'ancien placeholder) =================
 def scrape_annonces():
-    return "Scraping non configuré (sélecteurs à adapter)."
+    """Utilise l'IA pour extraire des annonces de Keur-immo."""
+    url = "https://keur-immo.com/benin"
+    try:
+        page_text = fetch_page(url)
+        if page_text.startswith("Erreur"):
+            return page_text
+        prompt = f"""
+Voici le contenu textuel de la page {url} (site d'annonces immobilières au Bénin).
+Extrais les annonces qui concernent des appartements, villas ou résidences meublées situés à Cotonou (quartiers : Fidjrossè, Haie Vive, Cadjehoun, Ganhi, Zongo, Akpakpa).
+Pour chaque annonce, donne le titre, le prix, la localisation et le lien (si trouvable).
+Format :
+🏠 Titre
+💰 Prix
+📍 Localisation
+🔗 Lien
+Si aucune annonce ne correspond, réponds "Aucune annonce pertinente trouvée."
+Contenu de la page :
+{page_text[:4000]}
+"""
+        messages = [{"role": "user", "content": prompt}]
+        return call_groq_with_tools(messages, tools=[])
+    except Exception as e:
+        return f"Erreur scraping IA : {str(e)}"
 
 def job_quotidien():
     chat_id = os.environ.get("ADMIN_CHAT_ID")
@@ -238,33 +382,14 @@ def job_quotidien():
 
 scheduler.add_job(job_quotidien, 'cron', hour=7, minute=0, timezone='Africa/Porto-Novo')
 
-# ================= RECHERCHE DUCKDUCKGO =================
-def duckduckgo_search(query):
-    try:
-        url = "https://api.duckduckgo.com/"
-        params = {"q": query, "format": "json", "no_html": 1, "skip_disambig": 1}
-        resp = requests.get(url, params=params, timeout=10)
-        data = resp.json()
-        abstract = data.get("AbstractText", "")
-        if abstract:
-            return abstract[:500]
-        related = data.get("RelatedTopics", [])
-        if related and isinstance(related[0], dict):
-            first_text = related[0].get("Text", "")
-            if first_text:
-                soup = BeautifulSoup(first_text, "html.parser")
-                return soup.get_text()[:500]
-        return "Aucune information trouvée pour cette recherche."
-    except Exception as e:
-        return f"Erreur recherche : {e}"
-
 # ================= COMMANDES TELEGRAM =================
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     if is_authorized(message):
         bot.reply_to(message, """👑 Mode Administrateur Larry
 Commandes : /mem, /save, /scrape, /search, /dire, /pc
-Larry est en ligne pour les clients.""")
+Larry est en ligne pour les clients.
+Pour une mission complexe, décrivez simplement ce que vous voulez (ex: 'trouve-moi 5 contacts de promoteurs à Cotonou').""")
     else:
         username = message.chat.username or message.chat.first_name or "vous"
         bot.reply_to(message, f"Bonjour {username}, je suis Larry, conseiller chez NovaTech-IA. Comment puis-je vous aider aujourd'hui ?")
@@ -312,8 +437,14 @@ def search_command(message):
         bot.reply_to(message, "Usage : /search <mots-clés>")
         return
     bot.send_chat_action(message.chat.id, 'typing')
-    result = duckduckgo_search(query)
-    bot.reply_to(message, f"🔍 Résultat : {result}")
+    results = search_web(query, 3)
+    if isinstance(results, list) and len(results) > 0:
+        reponse = ""
+        for i, r in enumerate(results, 1):
+            reponse += f"{i}. {r.get('title', 'Sans titre')}\n{r.get('snippet', '')}\n{r.get('url', '')}\n\n"
+        bot.reply_to(message, reponse or "Aucun résultat trouvé.")
+    else:
+        bot.reply_to(message, "Erreur de recherche.")
 
 @bot.message_handler(commands=['pc'])
 @authorized_only
@@ -325,7 +456,6 @@ def pc_commands(message):
 def dire_command(message):
     global pending_admin_chat_id
     try:
-        # Extraire le texte après /dire
         text = message.text.split(" ", 1)[1]
     except IndexError:
         bot.reply_to(message, "Usage : /dire <message à envoyer au prospect>")
@@ -335,11 +465,8 @@ def dire_command(message):
         bot.reply_to(message, "Aucun prospect en attente de réponse.")
         return
 
-    # Envoyer le message au prospect en attente
     bot.send_message(pending_admin_chat_id, text)
     bot.reply_to(message, f"✅ Message envoyé au prospect {pending_admin_chat_id}.")
-
-    # Réactiver la conversation (le prospect pourra reparler à Larry)
     pending_admin_chat_id = None
 
 @bot.message_handler(func=lambda m: True)
@@ -347,7 +474,6 @@ def handle_all(message):
     chat_id = str(message.chat.id)
     is_admin = is_authorized(message)
 
-    # Si le client est en attente et envoie un message, on le prévient
     if not is_admin and pending_admin_chat_id == chat_id:
         bot.reply_to(message, "Veuillez patienter, un conseiller va vous répondre personnellement.")
         return
@@ -362,7 +488,6 @@ def handle_all(message):
     response = process_message(message.text, chat_id, is_admin)
 
     if response is None:
-        # Cas où le client est en attente (traité plus haut)
         return
 
     if is_admin:
