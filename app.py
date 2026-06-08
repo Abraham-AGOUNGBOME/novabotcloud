@@ -61,13 +61,31 @@ Tu dois toujours utiliser les tarifs officiels fournis dans le contexte partagé
 Tu cherches sur le web, analyses les données, et fournis des rapports avec sources.
 Utilise l'outil search_web quand nécessaire. Sois précis et chiffré.
 Respecte scrupuleusement le contexte de NovaTech-IA : localisation Cotonou, Bénin, secteur des visites 3D immobilières.
-Ne donne jamais de tarif, sauf si tu cites exactement le bloc officiel fourni dans le contexte partagé.""",
+Ne donne jamais de tarif, sauf si tu cites exactement le bloc officiel fourni dans le contexte partagé.
+
+**FORMAT OBLIGATOIRE :**
+Après ton analyse textuelle, tu DOIS inclure un bloc [DATA] contenant les données brutes au format JSON.
+Exemple :
+[DATA]
+{
+  "titre": "Tendances 3D",
+  "sources": ["https://..."],
+  "chiffres_cles": ["+20% de croissance en 2026"],
+  "contacts": ["Nom: Société X, tel: +229..."],
+  "resume": "Résumé en une phrase."
+}
+[/DATA]
+""",
         "memory_file": "market_memory.md",
         "description": "Recherche de tendances, analyse de marché, veille concurrentielle"
     },
     "Créa": {
         "prompt": """Tu es Créa, l'agent créatif de NovaTech-IA, Cotonou, Bénin.
 Tu rédiges des posts Facebook, messages WhatsApp, accroches marketing.
+
+**UTILISATION DES DONNÉES :**
+Si le contexte contient un bloc [DATA] ou des DONNÉES STRUCTURÉES, utilise UNIQUEMENT les informations qui s'y trouvent pour composer ton message.
+Ne reformule jamais un chiffre ou un fait qui n'est pas explicitement dans ce bloc.
 
 RÈGLES ABSOLUES :
 - **Les seuls tarifs autorisés sont ceux du bloc officiel ci-dessous.** Tu dois les reproduire EXACTEMENT, sans ajout ni modification.
@@ -238,10 +256,8 @@ def simple_groq_call(messages, max_tokens=1000):
 
 # ================= HARNAIS DE VÉRIFICATION =================
 def verify_output(agent_name, output):
-    """Vérifie la cohérence de la sortie (pays, tarifs inventés, etc.)."""
     # Vérification des prix interdits
-    tarifs_autorises = ["75 000", "120 000", "5 000", "25 000"]  # en FCFA
-    # Capturer tous les montants en FCFA
+    tarifs_autorises = ["75 000", "120 000", "5 000", "25 000"]
     mots_prix = re.findall(r'\d[\d\s]*\d?\s?FCFA', output)
     for prix in mots_prix:
         chiffre = re.sub(r'[^\d]', '', prix)
@@ -254,7 +270,7 @@ def verify_output(agent_name, output):
     if "euro" in output.lower() and "FCFA" not in output:
         return "❌ Devise incorrecte. Tous les montants doivent être en FCFA."
 
-    # Vérification générique de cohérence via Groq
+    # Vérification générique
     prompt = f"""Tu es un vérificateur qualité pour NovaTech-IA (Cotonou, Bénin).
 Analyse cette sortie produite par l'agent {agent_name}.
 Contexte : visites 3D immobilières, tarifs stricts (75k, 120k, 5k FCFA).
@@ -265,7 +281,6 @@ Sortie : {output[:1500]}"""
     if "OK" in resp:
         return output
     else:
-        # Force une correction
         correction_prompt = f"""Corrige la sortie suivante selon cette remarque : {resp}
 Respecte scrupuleusement les tarifs officiels (75k, 120k, 5k FCFA) et le pays (Bénin).
 Sortie rejetée : {output[:1000]}
@@ -274,7 +289,6 @@ Nouvelle version :"""
         return corrected
 
 def validate_plan(plan, user_text):
-    """Valide que la séquence d'agents est pertinente."""
     prompt = f"""Superviseur, valide ce plan d'action pour : "{user_text}"
 Plan proposé : {plan}
 Réponds "OK" si adapté, sinon propose une meilleure séquence (ex: Market -> Créa)."""
@@ -282,7 +296,6 @@ Réponds "OK" si adapté, sinon propose une meilleure séquence (ex: Market -> C
     return "OK" in resp
 
 def orchestrate(user_text, shared_context):
-    """Choisit le(s) agent(s) le(s) plus adapté(s)."""
     agent_list = "\n".join([f"- {name}: {cfg['description']}" for name, cfg in AGENTS.items()])
     prompt = f"""Aiguilleur automatique. Analyse le message utilisateur et décide quel agent doit répondre.
 Agents disponibles :
@@ -300,6 +313,16 @@ Règles :
 Réponds UNIQUEMENT par le nom de l'agent ou une séquence (ex: "Market" ou "Coco").
 Message utilisateur : {user_text}"""
     return simple_groq_call([{"role": "user", "content": prompt}], max_tokens=50).strip()
+
+def extract_data_block(text):
+    """Extrait le contenu JSON d'un bloc [DATA]...[/DATA]."""
+    match = re.search(r"\[DATA\](.*?)\[/DATA\]", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except:
+            return None
+    return None
 
 # ================= TRAITEMENT ADMIN MULTI-AGENTS =================
 def process_admin_message(user_text):
@@ -319,6 +342,7 @@ def process_admin_message(user_text):
     agents_to_call = [a.strip() for a in plan.split("->")] if "->" in plan else [plan.strip()]
     context = user_text
     responses = []
+    last_data = None  # Pour stocker les données structurées de l'agent précédent
 
     for agent_name in agents_to_call:
         if agent_name not in AGENTS:
@@ -330,7 +354,10 @@ def process_admin_message(user_text):
         if agent_memory:
             messages.append({"role": "system", "content": f"Mémoire personnelle de {agent_name} :\n{agent_memory}"})
 
-        if len(responses) > 0:
+        # Si c'est le deuxième agent et qu'on a des données structurées, les injecter
+        if len(responses) > 0 and last_data:
+            context = f"Contexte précédent : {responses[-1]}\n\n**DONNÉES STRUCTURÉES :**\n{json.dumps(last_data, ensure_ascii=False)}\n\nTâche : {user_text}"
+        elif len(responses) > 0:
             context = f"Contexte précédent : {responses[-1]}\n\nTâche : {user_text}"
         else:
             context = user_text
@@ -338,9 +365,19 @@ def process_admin_message(user_text):
 
         resp = simple_groq_call(messages)
         resp = verify_output(agent_name, resp)
+        # Extraire les données structurées si présentes
+        data_block = extract_data_block(resp)
+        if data_block:
+            # On retire le bloc [DATA] de la réponse visible (optionnel)
+            resp = re.sub(r"\[DATA\].*?\[/DATA\]", "", resp, flags=re.DOTALL).strip()
+            last_data = data_block
+        else:
+            last_data = None
+
         responses.append(resp)
         resp = handle_memo_action(resp, agent_name)
 
+    # Assemblage final
     if len(responses) == 1:
         return responses[0]
     else:
